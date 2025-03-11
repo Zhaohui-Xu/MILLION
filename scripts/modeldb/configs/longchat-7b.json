@@ -1,0 +1,9 @@
+{
+    "model_name" : "longchat-7b",
+    "max_length" : 4096,
+    "stride" : 4096,
+    "d" : 128,
+    "n_heads" : 32,
+    "n_layers" : 32,
+    "folder" : "longchat-7b-v1.5-32k"
+}
