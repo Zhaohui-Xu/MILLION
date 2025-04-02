@@ -89,4 +89,4 @@ Results will be saved to `scripts/modeldb/results.jsonl` for possible further an
 
 This repository is maintained by Zongwu Wang and Peng Xu from the IMPACT Lab at SJTU, under the supervision of Professor Li Jiang and Fangxin Liu. If you find MILLION useful or relevant to your research, please kindly cite our paper:
 
-> Zongwu Wang=, Peng Xu=, Fangxin Liu*, Yiwei Hu, Qingxiao Sun, Gezi Li, Cheng Li, Xuan Wang, and Li Jiang*, MILLION: MasterIng Long-Context LLM InferenceVia Outlier-Immunized KV Product OuaNtization. In Proceedings of the 62st ACM/IEEE Design Automation Conference 2025.
+> Zongwu Wang=, Peng Xu=, Fangxin Liu*, Yiwei Hu, Qingxiao Sun, Gezi Li, Cheng Li, Xuan Wang, Li Jiang* and Haibin Guan, MILLION: Mastering Long-Context LLM Inference Via Outlier-Immunized KV Product Quantization. In Proceedings of the 62st ACM/IEEE Design Automation Conference 2025.
