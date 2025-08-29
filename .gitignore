@@ -1,0 +1,55 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.swp
+*.tmp
+*.log
+.python-version
+
+# Environments
+.env
+.venv/
+venv/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# OS/Editor
+.DS_Store
+.idea/
+.vscode/
+
+# Build artifacts
+build/
+dist/
+*.egg
+*.egg-info/
+*.whl
+*.o
+*.obj
+*.so
+*.ptx
+
+# CUDA extension (generated files)
+scripts/modeldb/bindings/build/
+scripts/modeldb/bindings/dist/
+scripts/modeldb/bindings/bindings.egg-info/
+scripts/modeldb/bindings/bindings.cpp
+scripts/modeldb/bindings/Interface.cu
+scripts/modeldb/bindings/*.so
+
+# Data & results
+models/
+datasets/
+kv_samples/
+centroids/
+scripts/modeldb/results.jsonl
+
+# Caches
+.cache/
+.huggingface/
+__pycache__/
+
+

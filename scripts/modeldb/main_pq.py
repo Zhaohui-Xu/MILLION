@@ -5,9 +5,21 @@ from tqdm import tqdm
 import pathlib
 import os
 import importlib
+import sys
+from pathlib import Path
 
-from ..utils.Namespace import UniConfig, load_config
-from ..utils.Timer import tprint, Timer
+
+# 使得可以导入 scripts.utils.*（脚本直接运行时）
+PROJECT_ROOT = pathlib.Path(__file__).resolve().parents[2]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.append(str(PROJECT_ROOT))
+try:
+    from ..utils.Namespace import UniConfig, load_config
+    from ..utils.Timer import tprint, Timer
+except ImportError:
+    from scripts.utils.Namespace import UniConfig, load_config
+    from scripts.utils.Timer import tprint, Timer
+
 import random
 import numpy as np
 import torch
@@ -90,12 +102,18 @@ if __name__ == "__main__":
     config.merged_training = args.merged_training
 
     from transformers import AutoConfig
-    from .models.ModelContext import get_context
+    try:
+        from .models.ModelContext import get_context
+    except ImportError:
+        from scripts.modeldb.models.ModelContext import get_context
 
     config.model_config = AutoConfig.from_pretrained(config.model_path)
     config.context = get_context(config.model_config.model_type)
 
-    from ..utils.pq_utils import nbits2dtype
+    try:
+        from ..utils.pq_utils import nbits2dtype
+    except ImportError:
+        from scripts.utils.pq_utils import nbits2dtype
     config.cache_dtype = nbits2dtype(config.nbits)
 
     # ================== Seed ==================
@@ -115,7 +133,10 @@ if __name__ == "__main__":
     # ================== baseline ==================
     if "baseline" in config.pipeline:
         tprint("Baseline")
-        from ..benchmarks import dataset2benchmark
+        try:
+            from ..benchmarks import dataset2benchmark
+        except ImportError:
+            from scripts.benchmarks import dataset2benchmark
         benchmark = dataset2benchmark[config.dataset]
 
         with config.context.baseline_context:
@@ -144,8 +165,15 @@ if __name__ == "__main__":
                 os.remove(key_sampled_path)
                 os.remove(value_sampled_path)
 
-        from .Errors import SamplingComplete
-        from ..benchmarks import dataset2benchmark
+        try:
+            from .Errors import SamplingComplete
+        except ImportError:
+            from scripts.modeldb.Errors import SamplingComplete
+
+        try:
+            from ..benchmarks import dataset2benchmark
+        except ImportError:
+            from scripts.benchmarks import dataset2benchmark
         benchmark = dataset2benchmark[config.dataset]
 
         config.sampled_nums = 0
@@ -162,9 +190,14 @@ if __name__ == "__main__":
     # ================== training ==================
     if "training" in config.pipeline and config.dataset != '_synthetic':
         tprint("Training")
-        from ..utils.fvecio import read_fvecs
-        from ..utils.pq_utils import train_pq
-        from ..utils.pq_utils import train_opq
+        try:
+            from ..utils.fvecio import read_fvecs
+            from ..utils.pq_utils import train_pq
+            from ..utils.pq_utils import train_opq
+        except ImportError:
+            from scripts.utils.fvecio import read_fvecs
+            from scripts.utils.pq_utils import train_pq
+            from scripts.utils.pq_utils import train_opq
         from torch import save
 
         os.makedirs(config.cent_root, exist_ok=True)
@@ -246,7 +279,10 @@ if __name__ == "__main__":
                 del key_A, val_A, 
                 torch.cuda.empty_cache()
 
-        from ..utils.pq_utils import DynamicPQCache
+        try:
+            from ..utils.pq_utils import DynamicPQCache
+        except ImportError:
+            from scripts.utils.pq_utils import DynamicPQCache
         cache = DynamicPQCache(
             bs = 1, # TODO: support batch size?
             num_key_value_heads=config.model_config.num_key_value_heads,
@@ -262,7 +298,10 @@ if __name__ == "__main__":
     
         tprint("Evaluation")
         
-        from ..benchmarks import dataset2benchmark
+        try:
+            from ..benchmarks import dataset2benchmark
+        except ImportError:
+            from scripts.benchmarks import dataset2benchmark
         benchmark = dataset2benchmark[config.dataset]
 
         with config.context.evaluation_context:
