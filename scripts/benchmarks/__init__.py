@@ -6,13 +6,13 @@ def select_benchmark(benchmark_name):
         return perplexity
     elif benchmark_name == 'speedtest':
         from .speedtest import speedtest
-        return speedtest
+        return speedtest # 实现了KVCache的speedtest
     elif benchmark_name == 'lm_eval_simple':
         from .lm_eval_simple import lm_eval_simple
         return lm_eval_simple
     elif benchmark_name == 'longbench':
         from .longbench import pred_long_bench
-        return pred_long_bench
+        return pred_long_bench # 实现了KVCache的longbench
     else:
         raise ValueError(f'Unknown benchmark name {benchmark_name}')
 

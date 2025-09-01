@@ -7,11 +7,11 @@ from itertools import product
 
 from ..utils.escape_codes import BLUE, END, escape_code_factory as ecf
 
-prefill_lengths = [1024, 2048, 4096, 8192, 16384, 32768]
-prefill_lengths = [1024, 2048, 4096, 8192, 16384]
-# prefill_lengths = [4096]
-# prefill_lengths = [32768]
-decoding_lengths = [129]
+# 快速验证模式：只测试1024长度，重复1次
+prefill_lengths = [256]  # 减少 prefill 长度，便于测试页面分配
+# prefill_lengths = [4096]  # 只测试1024
+# prefill_lengths = [1024, 2048, 4096, 8192, 16384]  # 原始完整测试
+decoding_lengths = [128]  # 增加 decoding 长度，确保触发页面分配
 
 def IgnoreOOM(clear_func=None):
     def decorator(func):
@@ -32,7 +32,7 @@ def synthetic_input_ids(tokenizer, prefill_length):
     from torch import randint
     return randint(0, len(tokenizer), (1, prefill_length))
 
-def speedtest(model, tokenizer, *, verbose=True, cache_clear_func=None, niter=5, breakdown=False, **kwargs):
+def speedtest(model, tokenizer, *, verbose=True, cache_clear_func=None, niter=1, breakdown=False, **kwargs):  # 改为1次重复
     ticker = Ticker('_speedtest')
     streamer = TextStreamer(tokenizer, skip_prompt=True)
 
@@ -70,7 +70,8 @@ def speedtest(model, tokenizer, *, verbose=True, cache_clear_func=None, niter=5,
             max_length=prefill_length + decoding_length,
             pad_token_id=tokenizer.pad_token_id,
             eos_token_id=None,  # Disable early stopping
-            temperature=0.0,
+            do_sample=False,            # 新增
+            # temperature=0.0,
             repetition_penalty=1.0,
             num_return_sequences=1,
         )
@@ -89,7 +90,7 @@ def speedtest(model, tokenizer, *, verbose=True, cache_clear_func=None, niter=5,
                 'decoding_length': dl,
             }
             synthetic_generation_task(pl, dl) # warmup
-            for _ in range(niter):
+            for _ in range(niter):  # 只重复1次
                 synthetic_generation_task(pl, dl)
 
                 intervals = ticker.intervals

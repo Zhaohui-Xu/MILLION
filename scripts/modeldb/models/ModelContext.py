@@ -4,10 +4,10 @@ import importlib
 
 @dataclass(frozen=True)
 class ModelContext:
-    init_context: ContextList
-    baseline_context: ContextList
-    sampling_context: ContextList
-    evaluation_context: ContextList
+    init_context: ContextList # 模型初始化时的上下文 
+    baseline_context: ContextList # 基线评测时的上下文  
+    sampling_context: ContextList # 采样阶段的上下文
+    evaluation_context: ContextList # 评测阶段的上下文
 
 registery = {}
 

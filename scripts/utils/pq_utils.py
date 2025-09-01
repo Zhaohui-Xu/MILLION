@@ -113,6 +113,7 @@ class DynamicPQCache(metaclass=Singleton):
         self.init_cache()
 
     def init_cache(self):
+        # 初始化缓存 bsz,k_heads,seq_idx,M <理解为Head_dim 拆成M个sub-dim>
         self.key_cache = [
             torch.zeros((self.bs, self.num_key_value_heads, 0, self.M), dtype=self.dtype, device='cuda')
             for _ in range(self.layer_num)
@@ -149,7 +150,7 @@ class DynamicPQCache(metaclass=Singleton):
         """
         cent is of shape (M, c, d//M)
         """
-        if key_cent is value_cent:
+        if key_cent is value_cent: # 如果key_cent和value_cent是同一个，则只保存一个
             self._cent = key_cent.contiguous()
             self.key_cent = self._cent
             self.value_cent = self._cent
@@ -183,27 +184,36 @@ class DynamicPQCache(metaclass=Singleton):
         self.key_cent = self.key_cent.to(current_device)
         self.value_cent = self.value_cent.to(current_device)
 
-        if distort_recent:
+        if distort_recent: # 用于控制是否在 prefill 阶段也使用全量化数据 
+            # 1. 量化编码 传入的KV向量
             key_codes = sa_encode_4d_keops(key_states, self.key_cent, target_dtype=self.dtype)
             value_codes = sa_encode_4d_keops(value_states, self.value_cent, target_dtype=self.dtype)
             # self.key_cache[layer_idx] = torch.cat([self.key_cache[layer_idx], key_codes], dim=2)
             # self.value_cache[layer_idx] = torch.cat([self.value_cache[layer_idx], value_codes], dim=2)
+            
+            # 2. 存储到 cache
             self.cat_codes(key_codes, value_codes, layer_idx)
-
+            
+            # 3. 反量化解码 - 返回 fp16 类型的 KV Cache
             key_states = sa_decode_4d(self.key_cache[layer_idx], self.key_cent)
             value_states = sa_decode_4d(self.value_cache[layer_idx], self.value_cent)
         else:
             if past_length > 0:
+                # 从量化 cache 中解码出历史 KV - 返回 fp16 类型的 KV
                 past_key_states = sa_decode_4d(self.key_cache[layer_idx], self.key_cent)
                 past_value_states = sa_decode_4d(self.value_cache[layer_idx], self.value_cent)
-
+            
+            # 4. 量化编码 当前KV
             key_codes = sa_encode_4d_keops(key_states, self.key_cent, target_dtype=self.dtype)
             value_codes = sa_encode_4d_keops(value_states, self.value_cent, target_dtype=self.dtype)
             # self.key_cache[layer_idx] = torch.cat([self.key_cache[layer_idx], key_codes], dim=2)
             # self.value_cache[layer_idx] = torch.cat([self.value_cache[layer_idx], value_codes], dim=2)
+            
+            # 存储到 cache
             self.cat_codes(key_codes, value_codes, layer_idx)
 
             if past_length > 0:
+                # 拼接历史 KV (反量化后的 fp16) + 当前 KV (FP16原始类型) 
                 key_states = torch.cat([past_key_states, key_states], dim=2)
                 value_states = torch.cat([past_value_states, value_states], dim=2)
 
@@ -219,6 +229,7 @@ class DynamicPQCache(metaclass=Singleton):
 
         TL;DR: Leave distort_recent=False when deploying models.
         """
+        print(f"DEBUG DynamicPQCache.prefill called: layer={layer_idx}, tokens={key_states.size(2)}")
         with Timer("DynamicPQCache.prefill"):
             with Timer("DynamicPQCache.prefill.encode"):
                 key_codes = sa_encode_4d_keops(key_states, self.key_cent, target_dtype=self.dtype)

@@ -7,7 +7,7 @@ import os
 import importlib
 import sys
 from pathlib import Path
-
+import time
 
 # 使得可以导入 scripts.utils.*（脚本直接运行时）
 PROJECT_ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -48,6 +48,13 @@ if __name__ == "__main__":
     parser.add_argument("--seed", type=int, help="Random seed", required=False, default=42)
     parser.add_argument("--half", action="store_true", help="Use half precision", required=False)
     parser.add_argument("--breakdown", action="store_true", help="Breakdown timing, could lead to overhead due to additional torch.cuda.synchronize", required=False)
+    
+    # Phase 3: 页式缓存相关选项
+    parser.add_argument("--paged", action="store_true", help="Enable paged attention with transposed V storage optimization", required=False)
+    parser.add_argument("--page_size", type=int, default=64, help="Page size in tokens for paged attention (default: 64)", required=False)
+    parser.add_argument("--extended_residual", type=int, default=128, help="Extended residual cache size in tokens (default: 128)", required=False)
+    parser.add_argument("--max_pages", type=int, default=1000, help="Maximum number of pages in page pool (default: 1000)", required=False)
+    
     parser.add_argument(
         "-p", "--pipeline",
         nargs='+',
@@ -88,6 +95,16 @@ if __name__ == "__main__":
         config.half = args.half
     if args.breakdown is not None:
         config.breakdown = args.breakdown
+    
+    # 页式缓存配置
+    if args.paged is not None:
+        config.paged = args.paged
+    if args.page_size is not None:
+        config.page_size = args.page_size
+    if args.extended_residual is not None:
+        config.extended_residual = args.extended_residual
+    if args.max_pages is not None:
+        config.max_pages = args.max_pages
 
     config.scalar_t = torch.float16 if config.half else torch.float32
 
@@ -228,6 +245,8 @@ if __name__ == "__main__":
         tprint("Exit")
         exit()
 
+    # 主要看这个 
+    
     # ================== PQ Config ==================
     if "evaluation" in config.pipeline:
         if config.dataset == '_synthetic':
@@ -236,9 +255,9 @@ if __name__ == "__main__":
             val_cent = torch.randn(config.M, 2**config.nbits, config.d // config.M, dtype=model.dtype, device=config.device)
         else:
             key_cent = torch.load(config.cent_root / f'key_cent_{config.M}_{config.nbits}.pq.pt', weights_only=True)
-            key_cent = key_cent.to(config.device).to(model.dtype)
+            key_cent = key_cent.to(config.device).to(model.dtype) # Load 质心
             val_cent = torch.load(config.cent_root / f'val_cent_{config.M}_{config.nbits}.pq.pt', weights_only=True)
-            val_cent = val_cent.to(config.device).to(model.dtype)
+            val_cent = val_cent.to(config.device).to(model.dtype) # Load 质心
 
             if config.opq is True:
                 tprint("OPQ patching model weights")
@@ -278,24 +297,57 @@ if __name__ == "__main__":
 
                 del key_A, val_A, 
                 torch.cuda.empty_cache()
-
-        try:
-            from ..utils.pq_utils import DynamicPQCache
-        except ImportError:
-            from scripts.utils.pq_utils import DynamicPQCache
-        cache = DynamicPQCache(
-            bs = 1, # TODO: support batch size?
-            num_key_value_heads=config.model_config.num_key_value_heads,
-            nh = config.model_config.num_attention_heads,
-            M = config.M,
-            layer_num=config.model_config.num_hidden_layers,
-            dtype=config.cache_dtype,
-            nbits=config.nbits,
-            d=config.d,
-            scalar_t=config.scalar_t,
-        )
+        # import ipdb; ipdb.set_trace()
+        # 智能缓存初始化 - 根据配置选择合适的缓存类型
+        if hasattr(config, 'paged') and config.paged:
+            try:
+                from ..utils.paged_pq_utils import PagedPQCache
+            except ImportError:
+                from scripts.utils.paged_pq_utils import PagedPQCache
+            
+            tprint("Initializing PagedPQCache with enhanced performance optimizations")
+            # 使用PagedPQCache（转置存储+页面管理优化）
+            cache = PagedPQCache(
+                bs=1,
+                num_key_value_heads=config.model_config.num_key_value_heads,
+                nh=config.model_config.num_attention_heads, 
+                M=config.M,
+                layer_num=config.model_config.num_hidden_layers,
+                dtype=config.cache_dtype,
+                nbits=config.nbits,
+                d=config.d,
+                scalar_t=config.scalar_t,
+                # 页式缓存专用参数
+                page_size=getattr(config, 'page_size', 64),
+                extended_residual_size=getattr(config, 'extended_residual', 128)
+            )
+            tprint(f"PagedPQCache initialized: {cache.page_size} tokens/page, {cache.extended_residual_size} residual tokens")
+            
+            # 添加性能监控
+            if hasattr(config, 'breakdown') and config.breakdown:
+                tprint("🔍 Performance monitoring enabled")
+        else:
+            try:
+                from ..utils.pq_utils import DynamicPQCache
+            except ImportError:
+                from scripts.utils.pq_utils import DynamicPQCache
+            
+            tprint("Initializing standard DynamicPQCache")
+            # init cache
+            cache = DynamicPQCache(
+                bs = 1, # TODO: support batch size?
+                num_key_value_heads=config.model_config.num_key_value_heads,
+                nh = config.model_config.num_attention_heads,
+                M = config.M, # 子空间数
+                layer_num=config.model_config.num_hidden_layers,
+                dtype=config.cache_dtype,
+                nbits=config.nbits,
+                d=config.d, # model_head_dim
+                scalar_t=config.scalar_t,
+            )
+        
         cache.set_cent(key_cent, val_cent)
-    
+
         tprint("Evaluation")
         
         try:
@@ -304,12 +356,54 @@ if __name__ == "__main__":
             from scripts.benchmarks import dataset2benchmark
         benchmark = dataset2benchmark[config.dataset]
 
+        # 添加性能监控
+        evaluation_start_time = time.time()
+        
         with config.context.evaluation_context:
-            score = benchmark(model, tokenizer, cache_clear_func=cache.init_cache, **(config.to_dict()))
+            cache_clear_func = cache.init_cache
+            score = benchmark(model, tokenizer, cache_clear_func=cache_clear_func, **(config.to_dict()))
+        
+        evaluation_time = time.time() - evaluation_start_time
+        
+        # 输出详细的性能统计
+        tprint(f"⏱️  Evaluation completed in {evaluation_time:.2f} seconds")
+        
+        # 如果是PagedPQCache，输出详细的缓存统计
+        if hasattr(config, 'paged') and config.paged:
+            try:
+                cache_stats = cache.get_cache_stats()
+                tprint("📊 PagedPQCache Statistics:")
+                tprint(f"  Total pages allocated: {cache_stats['total_pages_allocated']}")
+                tprint(f"  Total memory usage: {cache_stats['total_memory_usage_mb']:.2f} MB")
+                
+                # 输出每层的统计信息
+                for layer_stat in cache_stats['layer_stats']:
+                    tprint(f"  Layer {layer_stat['layer_idx']}: {layer_stat['seen_tokens']} tokens, {layer_stat['value_pages_count']} pages")
+            except Exception as e:
+                tprint(f"⚠️  Could not retrieve cache statistics: {e}")
 
-        # write to jsonl
+        # write to jsonl with performance data
+        result_data = {
+            "score": score, 
+            "evaluation_time_seconds": evaluation_time,
+            "cache_type": "PagedPQCache" if (hasattr(config, 'paged') and config.paged) else "DynamicPQCache"
+        }
+        
+        # 添加缓存统计信息
+        if hasattr(config, 'paged') and config.paged:
+            try:
+                cache_stats = cache.get_cache_stats()
+                result_data.update({
+                    "total_pages_allocated": cache_stats['total_pages_allocated'],
+                    "total_memory_usage_mb": cache_stats['total_memory_usage_mb'],
+                    "page_size": getattr(config, 'page_size', 64),
+                    "extended_residual_size": getattr(config, 'extended_residual', 128)
+                })
+            except:
+                pass
+        
         with open(config.root / "scripts" / "modeldb" / "results.jsonl", "a") as f:
-            f.write(json.dumps({"score": score, **config.to_serializable_dict()}))
+            f.write(json.dumps({**result_data, **config.to_serializable_dict()}))
             f.write("\n")
 
     tprint("Exit")
