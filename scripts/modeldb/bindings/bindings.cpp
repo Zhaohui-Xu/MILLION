@@ -20,103 +20,46 @@ using f32 = float;
 		const int r, \
 		const torch::Tensor partial_out_buffer, \
 		const torch::Tensor partial_lse_buffer \
-	);
-
-#define declare_flash_decoding_paged_v(T, code_alias, Nsv, Ltv, dv, Mv, Cv) \
-	torch::Tensor flash_decoding_paged_v_##T##code_alias##_Ns##Nsv##Lt##Ltv##d##dv##M##Mv##C##Cv( \
-		const torch::Tensor query, \
-		const torch::Tensor key_codes, \
-		const torch::Tensor key_cents, \
-		const torch::Tensor key_residuals, \
-		const torch::Tensor value_page_ids, \
-		const torch::Tensor value_page_pool, \
-		const torch::Tensor value_cents, \
-		const torch::Tensor value_residuals, \
-		const int r, \
-		const int n_pages, \
-		const int page_size, \
-		const torch::Tensor partial_out_buffer, \
-		const torch::Tensor partial_lse_buffer \
-	);
+	)
 declare_flash_decoding_allocated_buffer(f16, u8, 2, 64, 64, 32, 256);
-declare_flash_decoding_paged_v(f16, u8, 2, 64, 64, 32, 256);
 declare_flash_decoding_allocated_buffer(f16, u8, 2, 64, 64, 64, 256);
-declare_flash_decoding_paged_v(f16, u8, 2, 64, 64, 64, 256);
 declare_flash_decoding_allocated_buffer(f16, u8, 2, 128, 128, 32, 256);
-declare_flash_decoding_paged_v(f16, u8, 2, 128, 128, 32, 256);
 declare_flash_decoding_allocated_buffer(f16, u8, 2, 128, 128, 64, 256);
-declare_flash_decoding_paged_v(f16, u8, 2, 128, 128, 64, 256);
 declare_flash_decoding_allocated_buffer(f16, u8, 4, 64, 64, 32, 256);
-declare_flash_decoding_paged_v(f16, u8, 4, 64, 64, 32, 256);
 declare_flash_decoding_allocated_buffer(f16, u8, 4, 64, 64, 64, 256);
-declare_flash_decoding_paged_v(f16, u8, 4, 64, 64, 64, 256);
 declare_flash_decoding_allocated_buffer(f16, u8, 4, 128, 128, 32, 256);
-declare_flash_decoding_paged_v(f16, u8, 4, 128, 128, 32, 256);
 declare_flash_decoding_allocated_buffer(f16, u8, 4, 128, 128, 64, 256);
-declare_flash_decoding_paged_v(f16, u8, 4, 128, 128, 64, 256);
 declare_flash_decoding_allocated_buffer(f16, u8, 8, 64, 64, 32, 256);
-declare_flash_decoding_paged_v(f16, u8, 8, 64, 64, 32, 256);
 declare_flash_decoding_allocated_buffer(f16, u8, 8, 64, 64, 64, 256);
-declare_flash_decoding_paged_v(f16, u8, 8, 64, 64, 64, 256);
 declare_flash_decoding_allocated_buffer(f16, u8, 8, 128, 128, 32, 256);
-declare_flash_decoding_paged_v(f16, u8, 8, 128, 128, 32, 256);
 declare_flash_decoding_allocated_buffer(f16, u8, 8, 128, 128, 64, 256);
-declare_flash_decoding_paged_v(f16, u8, 8, 128, 128, 64, 256);
 declare_flash_decoding_allocated_buffer(f16, u8, 16, 64, 64, 32, 256);
-declare_flash_decoding_paged_v(f16, u8, 16, 64, 64, 32, 256);
 declare_flash_decoding_allocated_buffer(f16, u8, 16, 64, 64, 64, 256);
-declare_flash_decoding_paged_v(f16, u8, 16, 64, 64, 64, 256);
 declare_flash_decoding_allocated_buffer(f16, u8, 16, 128, 128, 32, 256);
-declare_flash_decoding_paged_v(f16, u8, 16, 128, 128, 32, 256);
 declare_flash_decoding_allocated_buffer(f16, u8, 16, 128, 128, 64, 256);
-declare_flash_decoding_paged_v(f16, u8, 16, 128, 128, 64, 256);
 declare_flash_decoding_allocated_buffer(f16, u8, 32, 64, 64, 32, 256);
-declare_flash_decoding_paged_v(f16, u8, 32, 64, 64, 32, 256);
 declare_flash_decoding_allocated_buffer(f16, u8, 32, 64, 64, 64, 256);
-declare_flash_decoding_paged_v(f16, u8, 32, 64, 64, 64, 256);
 declare_flash_decoding_allocated_buffer(f16, u8, 32, 128, 128, 32, 256);
-declare_flash_decoding_paged_v(f16, u8, 32, 128, 128, 32, 256);
 declare_flash_decoding_allocated_buffer(f16, u8, 32, 128, 128, 64, 256);
-declare_flash_decoding_paged_v(f16, u8, 32, 128, 128, 64, 256);
 PYBIND11_MODULE(bindings, m) {
     m.def("flash_decoding_allocated_buffer_f16u8_Ns2Lt64d64M32C256", &flash_decoding_allocated_buffer_f16u8_Ns2Lt64d64M32C256);
-    m.def("flash_decoding_paged_v_f16u8_Ns2Lt64d64M32C256", &flash_decoding_paged_v_f16u8_Ns2Lt64d64M32C256);
     m.def("flash_decoding_allocated_buffer_f16u8_Ns2Lt64d64M64C256", &flash_decoding_allocated_buffer_f16u8_Ns2Lt64d64M64C256);
-    m.def("flash_decoding_paged_v_f16u8_Ns2Lt64d64M64C256", &flash_decoding_paged_v_f16u8_Ns2Lt64d64M64C256);
     m.def("flash_decoding_allocated_buffer_f16u8_Ns2Lt128d128M32C256", &flash_decoding_allocated_buffer_f16u8_Ns2Lt128d128M32C256);
-    m.def("flash_decoding_paged_v_f16u8_Ns2Lt128d128M32C256", &flash_decoding_paged_v_f16u8_Ns2Lt128d128M32C256);
     m.def("flash_decoding_allocated_buffer_f16u8_Ns2Lt128d128M64C256", &flash_decoding_allocated_buffer_f16u8_Ns2Lt128d128M64C256);
-    m.def("flash_decoding_paged_v_f16u8_Ns2Lt128d128M64C256", &flash_decoding_paged_v_f16u8_Ns2Lt128d128M64C256);
     m.def("flash_decoding_allocated_buffer_f16u8_Ns4Lt64d64M32C256", &flash_decoding_allocated_buffer_f16u8_Ns4Lt64d64M32C256);
-    m.def("flash_decoding_paged_v_f16u8_Ns4Lt64d64M32C256", &flash_decoding_paged_v_f16u8_Ns4Lt64d64M32C256);
     m.def("flash_decoding_allocated_buffer_f16u8_Ns4Lt64d64M64C256", &flash_decoding_allocated_buffer_f16u8_Ns4Lt64d64M64C256);
-    m.def("flash_decoding_paged_v_f16u8_Ns4Lt64d64M64C256", &flash_decoding_paged_v_f16u8_Ns4Lt64d64M64C256);
     m.def("flash_decoding_allocated_buffer_f16u8_Ns4Lt128d128M32C256", &flash_decoding_allocated_buffer_f16u8_Ns4Lt128d128M32C256);
-    m.def("flash_decoding_paged_v_f16u8_Ns4Lt128d128M32C256", &flash_decoding_paged_v_f16u8_Ns4Lt128d128M32C256);
     m.def("flash_decoding_allocated_buffer_f16u8_Ns4Lt128d128M64C256", &flash_decoding_allocated_buffer_f16u8_Ns4Lt128d128M64C256);
-    m.def("flash_decoding_paged_v_f16u8_Ns4Lt128d128M64C256", &flash_decoding_paged_v_f16u8_Ns4Lt128d128M64C256);
     m.def("flash_decoding_allocated_buffer_f16u8_Ns8Lt64d64M32C256", &flash_decoding_allocated_buffer_f16u8_Ns8Lt64d64M32C256);
-    m.def("flash_decoding_paged_v_f16u8_Ns8Lt64d64M32C256", &flash_decoding_paged_v_f16u8_Ns8Lt64d64M32C256);
     m.def("flash_decoding_allocated_buffer_f16u8_Ns8Lt64d64M64C256", &flash_decoding_allocated_buffer_f16u8_Ns8Lt64d64M64C256);
-    m.def("flash_decoding_paged_v_f16u8_Ns8Lt64d64M64C256", &flash_decoding_paged_v_f16u8_Ns8Lt64d64M64C256);
     m.def("flash_decoding_allocated_buffer_f16u8_Ns8Lt128d128M32C256", &flash_decoding_allocated_buffer_f16u8_Ns8Lt128d128M32C256);
-    m.def("flash_decoding_paged_v_f16u8_Ns8Lt128d128M32C256", &flash_decoding_paged_v_f16u8_Ns8Lt128d128M32C256);
     m.def("flash_decoding_allocated_buffer_f16u8_Ns8Lt128d128M64C256", &flash_decoding_allocated_buffer_f16u8_Ns8Lt128d128M64C256);
-    m.def("flash_decoding_paged_v_f16u8_Ns8Lt128d128M64C256", &flash_decoding_paged_v_f16u8_Ns8Lt128d128M64C256);
     m.def("flash_decoding_allocated_buffer_f16u8_Ns16Lt64d64M32C256", &flash_decoding_allocated_buffer_f16u8_Ns16Lt64d64M32C256);
-    m.def("flash_decoding_paged_v_f16u8_Ns16Lt64d64M32C256", &flash_decoding_paged_v_f16u8_Ns16Lt64d64M32C256);
     m.def("flash_decoding_allocated_buffer_f16u8_Ns16Lt64d64M64C256", &flash_decoding_allocated_buffer_f16u8_Ns16Lt64d64M64C256);
-    m.def("flash_decoding_paged_v_f16u8_Ns16Lt64d64M64C256", &flash_decoding_paged_v_f16u8_Ns16Lt64d64M64C256);
     m.def("flash_decoding_allocated_buffer_f16u8_Ns16Lt128d128M32C256", &flash_decoding_allocated_buffer_f16u8_Ns16Lt128d128M32C256);
-    m.def("flash_decoding_paged_v_f16u8_Ns16Lt128d128M32C256", &flash_decoding_paged_v_f16u8_Ns16Lt128d128M32C256);
     m.def("flash_decoding_allocated_buffer_f16u8_Ns16Lt128d128M64C256", &flash_decoding_allocated_buffer_f16u8_Ns16Lt128d128M64C256);
-    m.def("flash_decoding_paged_v_f16u8_Ns16Lt128d128M64C256", &flash_decoding_paged_v_f16u8_Ns16Lt128d128M64C256);
     m.def("flash_decoding_allocated_buffer_f16u8_Ns32Lt64d64M32C256", &flash_decoding_allocated_buffer_f16u8_Ns32Lt64d64M32C256);
-    m.def("flash_decoding_paged_v_f16u8_Ns32Lt64d64M32C256", &flash_decoding_paged_v_f16u8_Ns32Lt64d64M32C256);
     m.def("flash_decoding_allocated_buffer_f16u8_Ns32Lt64d64M64C256", &flash_decoding_allocated_buffer_f16u8_Ns32Lt64d64M64C256);
-    m.def("flash_decoding_paged_v_f16u8_Ns32Lt64d64M64C256", &flash_decoding_paged_v_f16u8_Ns32Lt64d64M64C256);
     m.def("flash_decoding_allocated_buffer_f16u8_Ns32Lt128d128M32C256", &flash_decoding_allocated_buffer_f16u8_Ns32Lt128d128M32C256);
-    m.def("flash_decoding_paged_v_f16u8_Ns32Lt128d128M32C256", &flash_decoding_paged_v_f16u8_Ns32Lt128d128M32C256);
     m.def("flash_decoding_allocated_buffer_f16u8_Ns32Lt128d128M64C256", &flash_decoding_allocated_buffer_f16u8_Ns32Lt128d128M64C256);
-    m.def("flash_decoding_paged_v_f16u8_Ns32Lt128d128M64C256", &flash_decoding_paged_v_f16u8_Ns32Lt128d128M64C256);
 }

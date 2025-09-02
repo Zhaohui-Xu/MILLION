@@ -1,1 +1,0 @@
-python3 test_kernel.py --Ns 16 --d 128 --M 64 --C 256 --T 1000 --r 17 --iters 100

@@ -20,21 +20,4 @@ using f32 = float;
 		const int r, \
 		const torch::Tensor partial_out_buffer, \
 		const torch::Tensor partial_lse_buffer \
-	);
-
-#define declare_flash_decoding_paged_v(T, code_alias, Nsv, Ltv, dv, Mv, Cv) \
-	torch::Tensor flash_decoding_paged_v_##T##code_alias##_Ns##Nsv##Lt##Ltv##d##dv##M##Mv##C##Cv( \
-		const torch::Tensor query, \
-		const torch::Tensor key_codes, \
-		const torch::Tensor key_cents, \
-		const torch::Tensor key_residuals, \
-		const torch::Tensor value_page_ids, \
-		const torch::Tensor value_page_pool, \
-		const torch::Tensor value_cents, \
-		const torch::Tensor value_residuals, \
-		const int r, \
-		const int n_pages, \
-		const int page_size, \
-		const torch::Tensor partial_out_buffer, \
-		const torch::Tensor partial_lse_buffer \
-	);
+	)
