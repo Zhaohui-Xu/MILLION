@@ -201,7 +201,13 @@ __global__ void flash_decoding_paged_V_split_kernel
 	const int sid = blockIdx.z;
 	const int tid = threadIdx.x;
 	const cuscalar_t scale = cs::to_cuscalar<cuscalar_t>(1.0f / sqrt(d));
-	constexpr int n_warps = d / 32;
+	// constexpr int n_warps = d / 32;
+
+    // 定义必要的常量
+    constexpr int d_per_m = d / M;
+    constexpr int PAGE_SIZE = 64;  // 建议使用较小的page size，而不是d
+    constexpr int num_pages = (C + PAGE_SIZE - 1) / PAGE_SIZE;
+
 
     // GQA example: nh=32, nh_k=8, query with h=(0,1,2,3),(4,5,6,7) will attend to key_codes with hk=0,1
 	const int hk = h / (nh / nh_k);
@@ -215,6 +221,8 @@ __global__ void flash_decoding_paged_V_split_kernel
 
 	__shared__ cuscalar_t output[d]; // regarded as [1, d] or [1, M, d_m]
 	__shared__ __align__(16) code_t local_codes[Lt*M]; 
+	
+	
 
 	if (tid == blockDim.x - 1) {
 		prev_rowmax  = cs::to_cuscalar<cuscalar_t>(-CUDART_INF_F);
@@ -275,10 +283,10 @@ __global__ void flash_decoding_paged_V_split_kernel
 		S[tid] = csc::exp<cuscalar_t>()(csc::sub<cuscalar_t>()(S[tid], rowmax));
 
 		// 载入 value 的 codes 到共享内存（与 K 同步 tile）
-		// output = output * online_scale + S @ V, we decode V on-the-fly
+        // output = output * online_scale + S @ V, we decode V on-the-fly
         core::DeviceOps::block_op<cuscalar_t, core::Scalar::CuScalar::mul>(output, output, online_scale, d, blockDim.x, tid);
-		core::DeviceOps::block_copy<code_t>(local_codes, value_codes + b * (nh_k*nk*M) + hk * (nk*M) + tile_j_start * M, tile_j_len * M, blockDim.x, tid);
-		__syncthreads();
+        core::DeviceOps::block_copy<code_t>(local_codes, value_codes + b * (nh_k*nk*M) + hk * (nk*M) + tile_j_start * M, tile_j_len * M, blockDim.x, tid);
+        __syncthreads();
 
 		// We have threads tid = 0, 1, 2, ..., Lt-1 and add S (tile_j_len) @ V (tile_j_len, M, d/M) to output (M, d/M)
 		// If we parallelize over tile_j_len (which is a natural choice by blockDim.x), we have to use atomicAdd, which
@@ -287,19 +295,61 @@ __global__ void flash_decoding_paged_V_split_kernel
 		// So, we parallelize over d and use one single thread to sum up the output on each dimension.
 		// This implementation makes Lt=d the most performant choice.
 		
-		// 按维度 i 还原子空间与子维度，并用 code 查质心向量分量
-		for (int i=tid; i<d; i+=blockDim.x) {
-			const int m = i / (d/M); // example for d/m=2: tid = 0, 1, 2, ..., d-1 to m = 0, 0, 1, 1, ..., M-1, M-1
-			const int k = i % (d/M); // example for d/m=2: tid = 0, 1, 2, ..., d-1 to k = 0, 1, 0, 1, ..., 0, 1
-			cuscalar_t sum = cs::to_cuscalar<cuscalar_t>(0.0f);
-			for (int j=tile_j_start; j<tile_j_end; ++j) {
-				const int value_code = static_cast<int>(local_codes[(j-tile_j_start)*M + m]);
-				sum = csc::add<cuscalar_t>()(sum, csc::mul<cuscalar_t>()(S[j-tile_j_start], value_cents[m * C * (d/M) + value_code * (d/M) + k]));
-			}
-			output[i] = csc::add<cuscalar_t>()(output[i], sum);
-		}
-		__syncthreads();
+		// // 按维度 i 还原子空间与子维度，并用 code 查质心向量分量
+		// for (int i=tid; i<d; i+=blockDim.x) {
+		// 	const int m = i / (d/M); // example for d/m=2: tid = 0, 1, 2, ..., d-1 to m = 0, 0, 1, 1, ..., M-1, M-1
+		// 	const int k = i % (d/M); // example for d/m=2: tid = 0, 1, 2, ..., d-1 to k = 0, 1, 0, 1, ..., 0, 1
+		// 	cuscalar_t sum = cs::to_cuscalar<cuscalar_t>(0.0f);
+		// 	for (int j=tile_j_start; j<tile_j_end; ++j) {
+		// 		const int value_code = static_cast<int>(local_codes[(j-tile_j_start)*M + m]);
+		// 		sum = csc::add<cuscalar_t>()(sum, csc::mul<cuscalar_t>()(S[j-tile_j_start], value_cents[m * C * (d/M) + value_code * (d/M) + k]));
+		// 	}
+		// 	output[i] = csc::add<cuscalar_t>()(output[i], sum);
+		// }
+		// __syncthreads();
 
+		// Page缓存
+		__shared__ cuscalar_t page_buffer[M][d_per_m][PAGE_SIZE];
+		for (int page_id = 0; page_id < num_pages; ++page_id) {
+			// Step 1: 预加载当前page的质心数据
+			// 利用Page转置存储的连续性，批量加载
+			for (int m = 0; m < M; ++m) {
+				for (int k = 0; k < d_per_m; ++k) {
+					// 计算page在原始存储中的起始位置
+					// const int cent_base = m * C * d_per_m + k;  // [m][*][k]的基地址
+					const int page_start_code = page_id * PAGE_SIZE;
+					const int valid_codes = min((page_id + 1) * PAGE_SIZE, C) - page_start_code;
+					for (int local_code = tid; local_code < valid_codes; local_code += blockDim.x) {
+						const int actual_code = page_start_code + local_code;
+						page_buffer[m][k][local_code] = value_cents[(m * C * d_per_m + k) + actual_code * d_per_m];
+					}
+				}
+			}
+			__syncthreads();
+			
+			// Step 2: 计算当前page对应的贡献（保持原始计算逻辑）
+			for (int i = tid; i < d; i += blockDim.x) {
+				const int m = i / d_per_m;
+				const int k = i % d_per_m;
+				cuscalar_t sum = cs::to_cuscalar<cuscalar_t>(0.0f);
+				
+				for (int j = 0; j < tile_j_len; ++j) {
+					const int value_code = static_cast<int>(local_codes[j * M + m]);
+					
+					// 只处理属于当前page的codes
+					if (value_code >= page_id * PAGE_SIZE && value_code < (page_id + 1) * PAGE_SIZE) {
+						const int code_in_page = value_code - page_id * PAGE_SIZE;
+						sum = csc::add<cuscalar_t>()(sum,
+							csc::mul<cuscalar_t>()(S[j], page_buffer[m][k][code_in_page]));
+					}
+				}
+				
+				output[i] = csc::add<cuscalar_t>()(output[i], sum);
+			}
+			__syncthreads();
+		}
+
+		
 		// reduce S to sum_exp
 		if (tid == 0) {
 			sum_exp = core::DeviceOps::single_thread_reduce<cuscalar_t, core::Reduction::SumReduction>(S, Lt);
@@ -309,7 +359,7 @@ __global__ void flash_decoding_paged_V_split_kernel
         sum_exp = csc::add<cuscalar_t>()(csc::mul<cuscalar_t>()(online_scale, prev_sum_exp), sum_exp);
         prev_sum_exp = sum_exp;
 	}
-
+	
 	const int out_offset = b * (nh*(Ns+1)*d) + h * ((Ns+1)*d) + sid * d;
 	core::DeviceOps::block_op<cuscalar_t, core::Scalar::CuScalar::div>(out + out_offset, output, sum_exp, d, blockDim.x, tid);
     if (tid == 0) {

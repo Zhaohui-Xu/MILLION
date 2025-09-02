@@ -52,3 +52,5 @@ scripts/modeldb/results.jsonl
 .huggingface/
 __pycache__/
 
+/tests/
+_bindings/
