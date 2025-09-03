@@ -211,6 +211,7 @@ __global__ void flash_decoding_paged_V_split_kernel
     constexpr int PAGE_SIZE = 64;  // 建议使用较小的page size，而不是d
     constexpr int num_pages = (C + PAGE_SIZE - 1) / PAGE_SIZE;
 
+
     // GQA example: nh=32, nh_k=8, query with h=(0,1,2,3),(4,5,6,7) will attend to key_codes with hk=0,1
 	const int hk = h / (nh / nh_k);
 
@@ -223,10 +224,10 @@ __global__ void flash_decoding_paged_V_split_kernel
 
 	__shared__ cuscalar_t output[d]; // regarded as [1, d] or [1, M, d_m]
 	__shared__ __align__(16) code_t local_codes[Lt*M]; 
-
-	__shared__ cuscalar_t T[M*C];// 用于V的计算
-
 	
+	__shared__ cuscalar_t T[M*C];// 用于V的计算
+		
+
 	if (tid == blockDim.x - 1) {
 		prev_rowmax  = cs::to_cuscalar<cuscalar_t>(-CUDART_INF_F);
 		prev_sum_exp = cs::to_cuscalar<cuscalar_t>(0.0f);
@@ -302,46 +303,61 @@ __global__ void flash_decoding_paged_V_split_kernel
 		// So, we parallelize over d and use one single thread to sum up the output on each dimension.
 		// This implementation makes Lt=d the most performant choice.
 		
-		
-		// // // 按维度 i 还原子空间与子维度，并用 code 查质心向量分量
+		// 按维度 i 还原子空间与子维度，并用 code 查质心向量分量
 		// for (int i=tid; i<d; i+=blockDim.x) {
+		// 	const int m = i / (d/M); // example for d/m=2: tid = 0, 1, 2, ..., d-1 to m = 0, 0, 1, 1, ..., M-1, M-1
+		// 	const int k = i % (d/M); // example for d/m=2: tid = 0, 1, 2, ..., d-1 to k = 0, 1, 0, 1, ..., 0, 1
 		// 	cuscalar_t sum = cs::to_cuscalar<cuscalar_t>(0.0f);
-		// 	for (int j=tile_j_start; j<tile_j_end; ++j) {
-		// 		const int value_code = static_cast<int>(local_codes[(j-tile_j_start)*M + m]);// 列访问 Delta_V[i][m]
-		// 		sum = csc::add<cuscalar_t>()(sum, csc::mul<cuscalar_t>()(S[j-tile_j_start], value_cents[m * C * (d/M) + value_code * (d/M) + k]));
-		// 	}
+			// for (int j=tile_j_start; j<tile_j_end; ++j) {
+			// 	const int value_code = static_cast<int>(local_codes[(j-tile_j_start)*M + m]);// 列访问 Delta_V[i][m]
+			// 	sum = csc::add<cuscalar_t>()(sum, csc::mul<cuscalar_t>()(S[j-tile_j_start], value_cents[m * C * (d/M) + value_code * (d/M) + k]));
+			// }
 		// 	output[i] = csc::add<cuscalar_t>()(output[i], sum);
 		// }
 		// __syncthreads();
-		// value_codes, // shaped (bs, nh_k, nk, M)
-		// value_cents, // shaped (M, C, d_m)
-		
-		constexpr int WARP_SIZE = M;
-		// 直接将 warp_id 映射到 m，确保一个 warp 处理一个 M
-		const int m = tid / WARP_SIZE;
-		const int lane_id = tid % WARP_SIZE;
-	
-		// 因为每个 warp 只处理一个M，所以无需循环
-		// Warp 内的线程在 j 维度上并行
-		for (int j = tile_j_start + lane_id; j < tile_j_end; j += WARP_SIZE) {
-			const int value_code = static_cast<int>(local_codes[(j - tile_j_start) * M + m]);
-			// 直接写入，无需原子操作，因为每个 warp 独立处理其 m
-			T[m * C + value_code] = csc::add<cuscalar_t>()(T[m * C + value_code], S[j - tile_j_start]);
+
+		// value_codes, // shaped (bs, nh_k, nk, M) 《= 只有这个需要转置
+		// value_cents, // shaped (M, C, d_m) =>
+		// __shared__ cuscalar_t T[M*C];
+		// core::DeviceOps::block_fill_zero<cuscalar_t>(T, M*C, blockDim.x, tid);
+		// __syncthreads();
+
+		// naive版本
+		for (int i=tid; i<d; i+=blockDim.x) {
+			const int m = i / (d/M); // example for d/m=2: tid = 0, 1, 2, ..., d-1 to m = 0, 0, 1, 1, ..., M-1, M-1
+			const int k = i % (d/M); // example for d/m=2: tid = 0, 1, 2, ..., d-1 to k = 0, 1, 0, 1, ..., 0, 1
+			for (int j=tile_j_start; j<tile_j_end; ++j) {
+				// local_codes[M,tile_j_len]
+				const int value_code = static_cast<int>(local_codes[m * tile_j_len + (j-tile_j_start)]);// Delta_V[m][i] => onehot -> int				
+				T[m * C + value_code] = csc::add<cuscalar_t>()(T[m * C + value_code],S[j-tile_j_start]);
+				// atomicAdd(&T[m * C + value_code], S[j-tile_j_start]);
+			}
+			// __syncthreads();
+			// cuscalar_t sum = cs::to_cuscalar<cuscalar_t>(0.0f);
+			// for(int idx_c = 0;idx_c<C; ++idx_c){
+			// 	sum = csc::add<cuscalar_t>()(sum, csc::mul<cuscalar_t>()(
+			// 	// T[m * C + idx_c],value_cents[m * C * (d/M) + idx_c * (d/M) + k]));
+			// 	T[m * C + idx_c],value_cents[m * C * (d/M) + k * C + idx_c])); //value_cents_transpose, // shaped (M,d_m,C)
+			// }//=>指定M中d_m对应的结果 C次乘加
+			// output[i] = csc::add<cuscalar_t>()(output[i], sum);
 		}
 		__syncthreads();
 		
-		// 每个 warp 负责计算其对应的 m 的部分输出
-		for (int i = m * d_per_m + lane_id; i < (m + 1) * d_per_m; i += WARP_SIZE) {
-			const int k = i % d_per_m;              // m内的位置
-			cuscalar_t sum = cs::to_cuscalar<cuscalar_t>(0.0f);
-			// #pragma unroll
-			for (int c = 0; c < C; ++c) {
-				// 使用第m个warp计算的中间结果
-				sum = csc::add<cuscalar_t>()(sum, csc::mul<cuscalar_t>()(T[m * C + c], value_cents[m * C * d_per_m + c * d_per_m + k]));
-			}
-			output[i] = csc::add<cuscalar_t>()(output[i], sum);
-		}
-
+		// for (int i=tid; i<d; i+=blockDim.x) {
+		// 	const int m = i / (d/M); // example for d/m=2: tid = 0, 1, 2, ..., d-1 to m = 0, 0, 1, 1, ..., M-1, M-1
+		// 	const int k = i % (d/M); // example for d/m=2: tid = 0, 1, 2, ..., d-1 to k = 0, 1, 0, 1, ..., 0, 1
+		// 	// T[m] 表示 1*C的向量 C[m]表示(C,d_m) O[m]=1*d_m的向量
+		// 	// output的Shape为 1*(M*d_m)
+		// 	// output[m][k] = T[m] * C[m][C][k]
+		// 	cuscalar_t sum = cs::to_cuscalar<cuscalar_t>(0.0f);
+		// 	for(int idx_c = 0;idx_c<C;++ idx_c){
+		// 		sum = csc::add<cuscalar_t>()(sum, csc::mul<cuscalar_t>()(
+		// 		T[m * C + idx_c],value_cents[m * C * (d/M) + idx_c * (d/M) + k]));
+		// 	}//=>指定M中d_m对应的结果 C次乘加
+		// 	output[i] = csc::add<cuscalar_t>()(output[i], sum);
+		// }
+		// __syncthreads();
+		
 		// reduce S to sum_exp
 		if (tid == 0) {
 			sum_exp = core::DeviceOps::single_thread_reduce<cuscalar_t, core::Reduction::SumReduction>(S, Lt);

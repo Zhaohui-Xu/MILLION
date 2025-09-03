@@ -1,6 +1,6 @@
 bindings:
 	cd ./scripts/modeldb/bindings && \
-	python3 setup.py install && \
+	python setup.py install && \
 	cd ../../../../
 
 ppl:

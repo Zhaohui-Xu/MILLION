@@ -4,7 +4,7 @@ import torch
 from importlib import import_module
 from pathlib import Path
 import sys
-
+import nvtx
 # 使得可以导入 scripts.utils.pq_utils
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 sys.path.append(str(PROJECT_ROOT))
@@ -66,10 +66,21 @@ def main():
     partial_out = torch.empty(bs, nh, Ns+1, d, dtype=scalar_t, device=device)
     partial_lse = torch.empty(bs, nh, Ns+1, dtype=scalar_t, device=device)
 
-    # 正确性：与 PyTorch SDPA 对比
-    out = kernel(query, key_codes, value_codes, key_cents, value_cents,
-                key_residuals, value_residuals, r, partial_out, partial_lse)
-   
+    default = nvtx.start_range(message="sdpa_mode", color="yellow")
+    # print(f"The default implementation runs in {benchmark_torch_function_in_microseconds(F.scaled_dot_product_attention, query, key, value):.3f} microseconds")
+    
+    if not args.paged:
+        # 正确性：与 PyTorch SDPA 对比
+        out = kernel(query, key_codes, value_codes, key_cents, value_cents,
+                    key_residuals, value_residuals, r, partial_out, partial_lse)
+    else:
+        # 正确性：与 PyTorch SDPA 对比
+        out = kernel(query, key_codes, value_codes, key_cents, value_cents,
+                    key_residuals, value_residuals, r, partial_out, partial_lse)
+    nvtx.end_range(default)
+        
+        
+    # print(out)
     K_hat = sa_decode_4d(key_codes, key_cents)
     V_hat = sa_decode_4d(value_codes, value_cents)
     K_full = torch.cat([K_hat, key_residuals[:, :, :r, :]], dim=2)
