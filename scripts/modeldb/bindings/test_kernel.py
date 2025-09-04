@@ -66,7 +66,7 @@ def main():
     partial_out = torch.empty(bs, nh, Ns+1, d, dtype=scalar_t, device=device)
     partial_lse = torch.empty(bs, nh, Ns+1, dtype=scalar_t, device=device)
 
-    default = nvtx.start_range(message="sdpa_mode", color="yellow")
+    default = nvtx.start_range(message="unroll_paged", color="yellow")
     # print(f"The default implementation runs in {benchmark_torch_function_in_microseconds(F.scaled_dot_product_attention, query, key, value):.3f} microseconds")
     
     if not args.paged:

@@ -225,6 +225,7 @@ __global__ void flash_decoding_paged_V_split_kernel
 	__shared__ __align__(16) code_t local_codes[Lt*M]; 
 
 	__shared__ cuscalar_t T[M*C];// 用于V的计算
+	// __shared__ __align__(16) cuscalar_t T[M*C];// 用于V的计算
 
 	
 	if (tid == blockDim.x - 1) {
@@ -318,16 +319,24 @@ __global__ void flash_decoding_paged_V_split_kernel
 		
 		constexpr int WARP_SIZE = M;
 		// 直接将 warp_id 映射到 m，确保一个 warp 处理一个 M
-		const int m = tid / WARP_SIZE;
-		const int lane_id = tid % WARP_SIZE;
+		const int m = tid / WARP_SIZE;// 理解为全局的并行度？
+		const int lane_id = tid % WARP_SIZE;// 同Warp内的线程 会影响Shared Memory的Bank冲突
 	
 		// 因为每个 warp 只处理一个M，所以无需循环
 		// Warp 内的线程在 j 维度上并行
 		for (int j = tile_j_start + lane_id; j < tile_j_end; j += WARP_SIZE) {
-			const int value_code = static_cast<int>(local_codes[(j - tile_j_start) * M + m]);
+			// 当数据为u8时,Shared Memory中32个Bank,一行排布32个Word(4byte) => 128个byte为一行 128个u8为一行
+			// 如果 M=64，那么一个物理Warp（固定32个线程，同时执行动作）只构成了半个逻辑Warp。并发访问的是32个线程，而不是 M 个线程。
+			// 一个物理Warp(32线程)并行访问 local_codes 的同一列 m，但行号 j 不同。<冲突是考虑的物理Warp>
+			// 相邻两个线程的地址差异为M byte,之间相差多少个Word = M / 4 => 跨(M/4)%32个Bank
+			// Bank_Stride == 0 => 冲突路数为 32/(一个Bank能服务的线程数)
+			// Bank_Stride != 0 => 冲突路数为 gcd(32,Bank_Stride)
+			// 当M=64时，跨16个Bank,冲突路数为16
+			// 当M=32时，跨8个Bank,冲突路数为8
+			const int value_code = static_cast<int>(local_codes[(j - tile_j_start) * M + m]);// Warp按行读取
 			// 直接写入，无需原子操作，因为每个 warp 独立处理其 m
 			T[m * C + value_code] = csc::add<cuscalar_t>()(T[m * C + value_code], S[j - tile_j_start]);
-		}
+		}// 这个for循环主要的性能瓶颈在对Shared Memory的访问上
 		__syncthreads();
 		
 		// 每个 warp 负责计算其对应的 m 的部分输出
