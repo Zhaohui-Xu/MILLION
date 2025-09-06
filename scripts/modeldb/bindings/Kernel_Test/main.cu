@@ -95,10 +95,11 @@ void run_test(int Ns, int d, int M, int C, int T, int r, int iters) {
     auto out_ref = at::scaled_dot_product_attention(query, K_full, V_full, {}, {}, true);
     
     std::cout << "Reference output calculated." << std::endl;
-    
+    torch::Tensor value_codes_transposed = value_codes.transpose(2, 3).contiguous();
+
     nvtx3::range_handle h = nvtx3::start_range_in<nvtx3::domain::global>("Kernel_Test", nvtx3::rgb{127,255,0});
     auto out_base = kernel_baseline(query, key_codes, value_codes, key_cents, value_cents, key_residuals, value_residuals, r, partial_out, partial_lse);
-    auto out_test = kernel_test(query, key_codes, value_codes, key_cents, value_cents, key_residuals, value_residuals, r, partial_out, partial_lse);
+    auto out_test = kernel_test(query, key_codes, value_codes_transposed, key_cents, value_cents, key_residuals, value_residuals, r, partial_out, partial_lse);
     nvtx3::end_range_in<nvtx3::domain::global>(h); // Ends the range
 
     // --- 4. 测试 Baseline Kernel ---
@@ -127,17 +128,17 @@ void run_test(int Ns, int d, int M, int C, int T, int r, int iters) {
     {
         nvtx3::scoped_range test_range{"Test_Kernel"};
         std::cout << "\n--- Evaluating Test Kernel ---" << std::endl;
-        auto out_test = kernel_test(query, key_codes, value_codes, key_cents, value_cents, key_residuals, value_residuals, r, partial_out, partial_lse);
+        auto out_test = kernel_test(query, key_codes, value_codes_transposed, key_cents, value_cents, key_residuals, value_residuals, r, partial_out, partial_lse);
 
         auto mae = (out_test - out_ref).abs().mean().item<float>();
         auto mxe = (out_test - out_ref).abs().max().item<float>();
         printf("shape: (%ld, %ld, %ld, %ld), MAE: %.4e, MaxAbsErr: %.4e\n", out_test.size(0), out_test.size(1), out_test.size(2), out_test.size(3), mae, mxe);
 
-        for(int i=0; i<10; ++i) kernel_test(query, key_codes, value_codes, key_cents, value_cents, key_residuals, value_residuals, r, partial_out, partial_lse);
+        for(int i=0; i<10; ++i) kernel_test(query, key_codes, value_codes_transposed, key_cents, value_cents, key_residuals, value_residuals, r, partial_out, partial_lse);
         cudaDeviceSynchronize();
 
         auto start = std::chrono::high_resolution_clock::now();
-        for(int i=0; i<iters; ++i) kernel_test(query, key_codes, value_codes, key_cents, value_cents, key_residuals, value_residuals, r, partial_out, partial_lse);
+        for(int i=0; i<iters; ++i) kernel_test(query, key_codes, value_codes_transposed, key_cents, value_cents, key_residuals, value_residuals, r, partial_out, partial_lse);
         cudaDeviceSynchronize();
         auto end = std::chrono::high_resolution_clock::now();
 
