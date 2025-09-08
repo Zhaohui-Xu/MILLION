@@ -310,13 +310,23 @@ __global__ void flash_decoding_paged_V_split_kernel
 		// 	for (int j=tile_j_start; j<tile_j_end; ++j) {
 		// 		const int value_code = static_cast<int>(local_codes[(j-tile_j_start)*M + m]);// 列访问 Delta_V[i][m]
 		// 		sum = csc::add<cuscalar_t>()(sum, csc::mul<cuscalar_t>()(S[j-tile_j_start], value_cents[m * C * (d/M) + value_code * (d/M) + k]));
-		// 	}
+		// 	} // 理论上 对 value_cents 的大量全局访问会是性能瓶颈
 		// 	output[i] = csc::add<cuscalar_t>()(output[i], sum);
 		// }
 		// __syncthreads();
 		// value_codes, // shaped (bs, nh_k, nk, M)
 		// value_cents, // shaped (M, C, d_m)
+
 		
+		// 
+		// 	新的版本的优化:
+		// 		1.对于全局的value_cents,每个线程只需要访问256次,且优化了访问
+		// 		2.利用转置local_codes消除了Bank冲突
+		// 	代价:
+		// 		1.value_code作为随机值，会在多线程写入T的时候会存在冲突 需要用原子指令<新增开销>
+		// 		2.__syncthreads() 会强制所有线程块内的Warp等待
+		// 	对于性能相比于原版没有提升的分析(大概):
+		//  优化方案的并行度下降了 <Shared Memoryz开销太大 导致分配在实际SM上的Warp减少了47%(M=64)，导致了并行度的下降； M=32时没有影响所以性能差不多 >
 		constexpr int WARP_SIZE = M;
 		// 直接将 warp_id 映射到 m，确保一个 warp 处理一个 M
 		const int m = tid / WARP_SIZE;// warp_id
@@ -325,20 +335,12 @@ __global__ void flash_decoding_paged_V_split_kernel
 		// 因为每个 warp 只处理一个M，所以无需循环
 		// Warp 内的线程在 j 维度上并行
 		for (int j = tile_j_start + lane_id; j < tile_j_end; j += WARP_SIZE) {
-			// 当数据为u8时,Shared Memory中32个Bank,一行排布32个Word(4byte) => 128个byte为一行 128个u8为一行
-			// 如果 M=64，那么一个物理Warp（固定32个线程，同时执行动作）只构成了半个逻辑Warp。并发访问的是32个线程，而不是 M 个线程。
-			// 一个物理Warp(32线程)并行访问 local_codes 的同一列 m，但行号 j 不同。<冲突是考虑的物理Warp>
-			// 相邻两个线程的地址差异为M byte,之间相差多少个Word = M / 4 => 跨(M/4)%32个Bank
-			// Bank_Stride == 0 => 冲突路数为 32/(一个Bank能服务的线程数)
-			// Bank_Stride != 0 => 冲突路数为 gcd(32,Bank_Stride)
-			// 当M=64时，跨16个Bank,冲突路数为16
-			// 当M=32时，跨8个Bank,冲突路数为8
 			const int value_code = static_cast<int>(local_codes[m * tile_j_len + (j - tile_j_start)]);// Warp按行读取 V转置存 <冲突解决>
 			// 直接写入，无需原子操作，因为每个 warp 独立处理其 m,但Warp内的线程可能会冲突
-			// T[m * C + value_code] = csc::add<cuscalar_t>()(T[m * C + value_code], S[j - tile_j_start]);// 随机行读
 			atomicAdd(&T[m * C + value_code], S[j - tile_j_start]);
 		}// 这个for循环主要的性能瓶颈在对Shared Memory的访问上
-		__syncthreads();
+		
+		__syncthreads(); // 不是性能瓶颈
 		
 		// 每个 warp 负责计算其对应的 m 的部分输出
 		for (int i = m * d_per_m + lane_id; i < (m + 1) * d_per_m; i += WARP_SIZE) {
