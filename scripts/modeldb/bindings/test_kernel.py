@@ -20,7 +20,8 @@ def build_kernel(Ns: int, d: int, M: int, C: int):
         raise RuntimeError(f"Kernel {fname} 未编译。请在 scripts/modeldb/bindings/setup.py 中添加该组合并重新编译安装。")
 def build_paged_kernel(Ns: int, d: int, M: int, C: int):
     bindings = import_module("bindings")
-    fname = f"flash_decoding_allocated_paged_buffer_f16u8_Ns{Ns}Lt{d}d{d}M{M}C{C}"
+    # fname = f"flash_decoding_allocated_paged_buffer_f16u8_Ns{Ns}Lt{d}d{d}M{M}C{C}"
+    fname = f"flash_decoding_allocated_paged_split_qkv_buffer_f16u8_Ns{Ns}Lt{d}d{d}M{M}C{C}"
     try:
         return getattr(bindings, fname)
     except AttributeError:

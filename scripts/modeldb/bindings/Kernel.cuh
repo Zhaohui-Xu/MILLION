@@ -224,9 +224,12 @@ __global__ void flash_decoding_paged_V_split_kernel
 	__shared__ cuscalar_t output[d]; // regarded as [1, d] or [1, M, d_m]
 	__shared__ __align__(16) code_t local_codes[Lt*M]; 
 
-	__shared__ cuscalar_t T[M*C];// 用于V的计算
+	__shared__ cuscalar_t T[M*C];// 用于V的计算 => 改为动态分配
 	// __shared__ __align__(16) cuscalar_t T[M*C];// 用于V的计算
-
+	
+	// 1. 声明外部动态共享内存数组
+    // extern __shared__ char T_dyn[];
+	// cuscalar_t* T = reinterpret_cast<cuscalar_t*>(T_dyn);
 	
 	if (tid == blockDim.x - 1) {
 		prev_rowmax  = cs::to_cuscalar<cuscalar_t>(-CUDART_INF_F);
@@ -369,6 +372,351 @@ __global__ void flash_decoding_paged_V_split_kernel
     if (tid == 0) {
 		lse[b * (nh*(Ns+1)) + h * (Ns+1) + sid] = csc::add<cuscalar_t>()(csc::log<cuscalar_t>()(sum_exp), rowmax);
 	}
+}
+
+
+template
+<
+	typename cuscalar_t, 
+	typename code_t,
+	int Ns, // number of splits along the nk dimension
+	int Lt, // number of key_codes and value_codes inside a tile.
+	int d,
+	int M,
+	int C
+>
+__global__ void flash_decoding_paged_V_split_kernel_phase_qk
+(
+	const cuscalar_t * __restrict__ ad_lut, // shaped (bs, nh, M, C)
+	const code_t * __restrict__ key_codes, // shaped (bs, nh_k, nk, M)
+	cuscalar_t * __restrict__ out, // shaped (bs, nh, Ns+1, d)
+	cuscalar_t * __restrict__ lse, // shaped (bs, nh, Ns+1)
+	cuscalar_t * __restrict__ s_out, // shaped (bs, nh, nk)
+	cuscalar_t * __restrict__ sum_exp_out, // shaped (bs, nh, Ns+1)
+	const int bs,
+	const int nh,
+	const int nh_k,
+	const int nk,
+	const int Ls // number of key_codes and value_codes inside a split.
+)
+{
+	/**
+	 * kernel launch info:
+	 * grid sized (bs, nh, Ns)
+	 * block sized (Lt, 1, 1)
+	*/
+
+	using v16_t = typename core::Vector::VectorType<16>::type; // 16 bytes
+
+	const int b = blockIdx.x;
+	const int h = blockIdx.y;
+	const int sid = blockIdx.z;
+	const int tid = threadIdx.x;
+	const cuscalar_t scale = cs::to_cuscalar<cuscalar_t>(1.0f / sqrt(d));
+	constexpr int n_warps = d / 32;
+
+    // 定义必要的常量
+    constexpr int d_per_m = d / M;
+
+    // GQA example: nh=32, nh_k=8, query with h=(0,1,2,3),(4,5,6,7) will attend to key_codes with hk=0,1
+	const int hk = h / (nh / nh_k);
+
+    __shared__ cuscalar_t S[Lt]; // regarded as [1, Lt]
+	__shared__ cuscalar_t prev_rowmax;
+	__shared__ cuscalar_t rowmax;
+	__shared__ cuscalar_t prev_sum_exp;
+	__shared__ cuscalar_t sum_exp; // denoted as l in the paper https://crfm.stanford.edu/2023/07/17/flash2.html
+	__shared__ cuscalar_t online_scale;
+
+	// __shared__ cuscalar_t output[d]; // regarded as [1, d] or [1, M, d_m]
+	__shared__ __align__(16) code_t local_codes[Lt*M]; 
+
+	if (tid == blockDim.x - 1) {
+		prev_rowmax  = cs::to_cuscalar<cuscalar_t>(-CUDART_INF_F);
+		prev_sum_exp = cs::to_cuscalar<cuscalar_t>(0.0f);
+		rowmax       = cs::to_cuscalar<cuscalar_t>(-CUDART_INF_F);
+		sum_exp      = cs::to_cuscalar<cuscalar_t>(0.0f);
+	}
+
+    // core::DeviceOps::block_fill_zero<cuscalar_t>(output, d, blockDim.x, tid);
+    // __syncthreads();
+
+    const int lut_offset = b * (nh*M*C) + h * (M*C);
+	// in a split, loop over all tiles
+	const int split_j_start = sid * Ls;
+	const int split_j_end = min((sid + 1) * Ls, nk);
+	code_t key_code = 0;
+	int local_lut_offset = 0;
+    v16_t key_code_batch;
+
+    for (int tile_j_start=split_j_start; tile_j_start<split_j_end; tile_j_start+=Lt) {
+		const int tile_j_end = min(tile_j_start + Lt, split_j_end);
+		const int tile_j_len = tile_j_end - tile_j_start; // <= Lt
+
+		core::DeviceOps::block_copy<code_t>(local_codes, key_codes + b * (nh_k*nk*M) + hk * (nk*M) + tile_j_start * M, tile_j_len * M, blockDim.x, tid);
+		__syncthreads();
+		// S = scale * q @ KT
+		if (tid < tile_j_len) { 
+			local_lut_offset = 0;
+			cuscalar_t sim = cs::to_cuscalar<cuscalar_t>(0.0f);	
+
+			for (int m = 0; m < M / sizeof(v16_t); ++m) {
+				key_code_batch = reinterpret_cast<v16_t&>(local_codes[tid * M + m * sizeof(v16_t)]);
+				local_lut_offset = C * m * sizeof(v16_t);
+
+				code_t *key_code_batch_ptr = reinterpret_cast<code_t*>(&key_code_batch);
+				for (int i = 0; i < sizeof(v16_t); ++i) {
+					key_code = key_code_batch_ptr[i];
+					sim = csc::add<cuscalar_t>()(sim, ad_lut[lut_offset + local_lut_offset + i * C + key_code]);
+				}
+			}
+
+			S[tid] = csc::mul<cuscalar_t>()(sim, scale);
+		} else {
+            S[tid] = cs::to_cuscalar<cuscalar_t>(-CUDART_INF_F);
+        }
+		__syncthreads();
+
+		if (tid == 0) {
+			// reduce S to rowmax
+			rowmax = core::DeviceOps::single_thread_reduce<cuscalar_t, core::Reduction::MaxReduction>(S, Lt);
+			rowmax = csc::max<cuscalar_t>()(rowmax, prev_rowmax);
+			online_scale = csc::exp<cuscalar_t>()(csc::sub<cuscalar_t>()(prev_rowmax, rowmax));
+			prev_rowmax = rowmax;
+		}
+
+		__syncthreads();
+		
+		// subs S with rowmax, exp S
+		S[tid] = csc::exp<cuscalar_t>()(csc::sub<cuscalar_t>()(S[tid], rowmax));
+		__syncthreads();
+
+		const int s_out_offset = b * (nh*nk) + h * nk + tile_j_start;
+		
+		// s_out_offset[bs,nh,nk] S[Lt] split_j_start = sid * Ls;
+		// core::DeviceOps::block_copy<cuscalar_t>(
+		// 	s_out + s_out_offset, // 目标地址：s_out 的基地址 + 偏移量
+		// 	S,                    // 源地址：共享内存 S 的基地址
+		// 	tile_j_len,           // 拷贝长度：tile_j_len 个元素
+		// 	blockDim.x,           // 参与工作的线程数
+		// 	tid                   // 当前线程的ID
+		// );
+
+		// 1. 计算目标地址的基指针
+		// const int s_out_offset = b * (nh*nk) + h * nk + tile_j_start;
+		cuscalar_t* s_out_ptr = s_out + s_out_offset;
+
+		// 2. 使用标准的 grid-stride 循环进行并行拷贝
+		//    这个循环是逐元素的，没有任何地址对齐问题。
+		for (int i = tid; i < tile_j_len; i += blockDim.x) {
+			s_out_ptr[i] = S[i];
+		}
+		__syncthreads();
+
+		// reduce S to sum_exp
+		if (tid == 0) {
+			sum_exp = core::DeviceOps::single_thread_reduce<cuscalar_t, core::Reduction::SumReduction>(S, Lt);
+		}
+		__syncthreads();
+
+        sum_exp = csc::add<cuscalar_t>()(csc::mul<cuscalar_t>()(online_scale, prev_sum_exp), sum_exp);
+        prev_sum_exp = sum_exp;
+		
+	}
+	
+	// const int out_offset = b * (nh*(Ns+1)*d) + h * ((Ns+1)*d) + sid * d;
+	// core::DeviceOps::block_op<cuscalar_t, core::Scalar::CuScalar::add>(out + out_offset, output, 0.0, d, blockDim.x, tid);
+	if (tid == 0) {
+		const int sum_exp_offset = b * (nh * (Ns + 1)) + h * (Ns + 1) + sid;
+		sum_exp_out[sum_exp_offset] = sum_exp;
+		lse[b * (nh*(Ns+1)) + h * (Ns+1) + sid] = csc::add<cuscalar_t>()(csc::log<cuscalar_t>()(sum_exp), rowmax);
+	}
+}
+
+
+template
+<
+	typename cuscalar_t, 
+	typename code_t,
+	int Ns, // number of splits along the nk dimension
+	int Lt, // number of key_codes and value_codes inside a tile.
+	int d,
+	int M,
+	int C
+>
+__global__ void flash_decoding_paged_V_split_kernel_phase_sv
+(
+	const code_t * __restrict__ value_codes, // shaped (bs, nh_k, nk, M)
+	const cuscalar_t * __restrict__ value_cents, // shaped (M, C, d_m)
+	cuscalar_t * __restrict__ out, // shaped (bs, nh, Ns+1, d)
+	cuscalar_t * __restrict__ lse, // shaped (bs, nh, Ns+1)
+	cuscalar_t * __restrict__ s_out, // shaped (bs,nh,nk)
+	cuscalar_t * __restrict__ sum_exp_out, // shaped (bs, nh, Ns+1)
+	const int bs,
+	const int nh,
+	const int nh_k,
+	const int nk,
+	const int Ls // number of key_codes and value_codes inside a split.
+)
+{
+	/**
+	 * kernel launch info:
+	 * grid sized (bs, nh, Ns*M)
+	 * block sized (Lt, 1, 1)
+	*/
+
+	using v16_t = typename core::Vector::VectorType<16>::type; // 16 bytes
+	
+	// 确定在哪一个ThresBlock块上
+	const int b = blockIdx.x; 
+	const int h = blockIdx.y;
+	
+	//每个thresblock算一个m
+	const int m_pass = blockIdx.z % M;
+	const int sid = blockIdx.z / M;
+	
+	// 确定在哪一个线程上 对应head_dim_index
+	const int tid = threadIdx.x;
+
+	const cuscalar_t scale = cs::to_cuscalar<cuscalar_t>(1.0f / sqrt(d));
+	constexpr int n_warps = d / 32;
+
+    // 定义必要的常量
+    constexpr int d_per_m = d / M;
+
+    // GQA example: nh=32, nh_k=8, query with h=(0,1,2,3),(4,5,6,7) will attend to key_codes with hk=0,1
+	const int hk = h / (nh / nh_k);
+
+    __shared__ cuscalar_t S[Lt]; // regarded as [1, Lt]
+	__shared__ __align__(16) code_t local_v_codes[Lt]; 
+	__shared__ cuscalar_t T[C];// 用于V的计算
+	__shared__ cuscalar_t output_local[d_per_m]; 
+
+    core::DeviceOps::block_fill_zero<cuscalar_t>(output_local, d_per_m, blockDim.x, tid);
+    __syncthreads();
+
+	// in a split, loop over all tiles
+	const int split_j_start = sid * Ls; // seq的起点
+	const int split_j_end = min((sid + 1) * Ls, nk);// nk是总长度
+
+	// 每个块负责算K_Seqlen为Ls长度的数据，步长为Lt(虽然和d一个数值大小 但是不是d的意思)
+    for (int tile_j_start=split_j_start; tile_j_start<split_j_end; tile_j_start+=Lt) {
+		const int tile_j_end = min(tile_j_start + Lt, split_j_end);
+		const int tile_j_len = tile_j_end - tile_j_start; // <= Lt
+		
+		// a. 加载当前 tile 的注意力权重 S
+        const int s_out_offset = b * (nh * nk) + h * nk + tile_j_start;
+        // core::DeviceOps::block_copy<cuscalar_t>(S, s_out + s_out_offset, tile_j_len, blockDim.x, tid);
+		
+		const cuscalar_t* global_s_out_ptr = s_out + s_out_offset;
+
+		// 2. 使用标准的 grid-stride 循环进行并行拷贝
+		//    这个循环是逐元素的，没有任何地址对齐问题。
+		for (int i = tid; i < tile_j_len; i += blockDim.x) {
+			S[i] = global_s_out_ptr[i];
+		}
+
+		// b. 加载当前 tile 和当前 m_pass 对应的 value_codes
+        //    这是一个跨步加载 (strided load)
+        const code_t* v_codes_ptr = value_codes + b * (nh_k * nk * M) + hk * (nk * M) + m_pass;
+        for (int j = tid; j < tile_j_len; j += blockDim.x) {
+            local_v_codes[j] = v_codes_ptr[ (tile_j_start + j) * M ];
+        }
+        __syncthreads();
+
+		// c. 构建直方图 T
+        //    T[c] = sum(S[j]) for all j where value_code[j] == c
+        for (int i = tid; i < C; i += blockDim.x) {
+            T[i] = cs::to_cuscalar<cuscalar_t>(0.0f);
+        }
+        __syncthreads();
+
+		for (int j = tid; j < tile_j_len; j += blockDim.x) {
+            const int value_code = static_cast<int>(local_v_codes[j]);
+            atomicAdd(&T[value_code], S[j]);
+        }
+        __syncthreads();
+
+		for (int k = tid; k < d_per_m; k += blockDim.x) {
+            cuscalar_t sum = cs::to_cuscalar<cuscalar_t>(0.0f);
+            for (int c = 0; c < C; ++c) {
+                sum = csc::add<cuscalar_t>()(sum, csc::mul<cuscalar_t>()(T[c], value_cents[m_pass * C * d_per_m + c * d_per_m + k]));
+            }
+            atomicAdd(&output_local[k], sum);
+        }
+		__syncthreads(); // 确保当前 tile 计算完成
+	}    
+  	const int out_offset = b * (nh*(Ns+1)*d) + h * ((Ns+1)*d) + sid * d + m_pass * d_per_m;
+    for (int k = tid; k < d_per_m; k += blockDim.x) {
+        out[out_offset + k] = output_local[k];
+    }
+}
+
+// 在 phase_sv 内核之后，添加这个新内核
+template
+<
+    typename cuscalar_t,
+    int Ns,
+    int Lt,
+    int d,
+    int M
+>
+__global__ void reduce_kernel
+(
+    cuscalar_t * __restrict__ out, // 同时作为输入和输出
+    const cuscalar_t * __restrict__ sum_exp_out,
+	const int bs,
+	const int nh,
+	const int nh_k,
+	const int nk,
+	const int Ls // n
+)
+{
+    // ====================================================================
+    // 1. 索引 (Grid大小为 Ns)
+    // ====================================================================
+    const int b = blockIdx.x;
+    const int h = blockIdx.y;
+    const int sid = blockIdx.z;
+    const int tid = threadIdx.x;
+
+    // ====================================================================
+    // 2. 共享内存声明
+    // ====================================================================
+    // 用于在块内合并 M 个分片的结果
+    __shared__ cuscalar_t final_output[d];
+
+    // ====================================================================
+    // 3. 合并 M 个分片
+    // ====================================================================
+    // a. 初始化共享内存
+    for (int i = tid; i < d; i += blockDim.x) {
+        final_output[i] = cs::to_cuscalar<cuscalar_t>(0.0f);
+    }
+    __syncthreads();
+
+    // b. 从全局 out 读取 M 个分片，并累加到共享内存
+    const int out_base_offset = b * (nh*(Ns+1)*d) + h * ((Ns+1)*d) + sid * d;
+    constexpr int d_per_m = d / M;
+    for (int m = 0; m < M; ++m) {
+        const int read_offset = out_base_offset + m * d_per_m;
+        for (int k = tid; k < d_per_m; k += blockDim.x) {
+            atomicAdd(&final_output[m * d_per_m + k], out[read_offset + k]);
+        }
+    }
+    __syncthreads();
+
+    // ====================================================================
+    // 4. 归一化并写回
+    // ====================================================================
+    // a. 读取最终的归一化因子
+    const int sum_exp_offset = b * (nh * (Ns + 1)) + h * (Ns + 1) + sid;
+    const cuscalar_t final_sum_exp = sum_exp_out[sum_exp_offset];
+
+    // b. 对共享内存中的 final_output 进行归一化，并写回全局 out
+    for (int i = tid; i < d; i += blockDim.x) {
+        out[out_base_offset + i] = csc::div<cuscalar_t>()(final_output[i], final_sum_exp);
+    }
 }
 
 
