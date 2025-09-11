@@ -21,7 +21,8 @@ def build_kernel(Ns: int, d: int, M: int, C: int):
 def build_paged_kernel(Ns: int, d: int, M: int, C: int):
     bindings = import_module("bindings")
     # fname = f"flash_decoding_allocated_paged_buffer_f16u8_Ns{Ns}Lt{d}d{d}M{M}C{C}"
-    fname = f"flash_decoding_allocated_paged_split_qkv_buffer_f16u8_Ns{Ns}Lt{d}d{d}M{M}C{C}"
+    # fname = f"flash_decoding_allocated_paged_split_qkv_buffer_f16u8_Ns{Ns}Lt{d}d{d}M{M}C{C}"
+    fname = f"flash_decoding_allocated_paged_lastblock_sync_buffer_f16u8_Ns{Ns}Lt{d}d{d}M{M}C{C}"
     try:
         return getattr(bindings, fname)
     except AttributeError:

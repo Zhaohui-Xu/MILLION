@@ -69,11 +69,11 @@ run_profiling() {
 
 # --- 在这里选择你要运行的分析任务 ---
 # run_profiling "full" "Kernel_Test" "comparison_report_M_16_transporse" 16
-run_profiling "full" "Kernel_Test" "comparison_report_M_32_transporse_split_qkv" 32
+# run_profiling "full" "Kernel_Test" "comparison_report_M_32_transporse_split_qkv" 32
 # run_profiling "full" "Kernel_Test" "comparison_report_M_64_transporse_dynamic_shared_memory" 64
 # ./kernel_test.bin --Ns 16 --d 128 --M 16 --T 1000 --r 17 --iters 100 # 性能比Baseline差 baseline 快3ms？为什么？
 # ./kernel_test.bin --Ns 16 --d 128 --M 32 --T 1000 --r 17 --iters 100 # 性能和Baseline持平
-# ./kernel_test.bin --Ns 16 --d 128 --M 64 --T 1000 --C 256 --r 17 --iters 100 # 并行度掉了
+./kernel_test.bin --Ns 16 --d 128 --M 64 --T 1000 --C 256 --r 17 --iters 100 # 并行度掉了
 # ./kernel_test.bin --Ns 16 --d 128 --M 64 --T 1000 --C 128 --r 17 --iters 100 # 并行度保持住了
 # # Bank冲突的问题 是否能够解决
 

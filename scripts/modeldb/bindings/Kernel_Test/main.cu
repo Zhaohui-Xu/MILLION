@@ -29,6 +29,8 @@ std::map<std::string, KernelFunc> kernel_registry;
         kernel_registry[name_paged] = flash_decoding_allocated_paged_buffer_##T##code_alias##_Ns##Nsv##Lt##Ltv##d##dv##M##Mv##C##Cv; \
         std::string name_paged_split_qkv = "flash_decoding_allocated_paged_split_qkv_buffer_" #T #code_alias "_Ns" #Nsv "Lt" #Ltv "d" #dv "M" #Mv "C" #Cv; \
         kernel_registry[name_paged_split_qkv] = flash_decoding_allocated_paged_split_qkv_buffer_##T##code_alias##_Ns##Nsv##Lt##Ltv##d##dv##M##Mv##C##Cv; \
+        std::string name_paged_lastblock_sync = "flash_decoding_allocated_paged_lastblock_sync_buffer_" #T #code_alias "_Ns" #Nsv "Lt" #Ltv "d" #dv "M" #Mv "C" #Cv; \
+        kernel_registry[name_paged_lastblock_sync] = flash_decoding_allocated_paged_lastblock_sync_buffer_##T##code_alias##_Ns##Nsv##Lt##Ltv##d##dv##M##Mv##C##Cv; \
     }
 
 // C++版本的 sa_decode_4d，用于计算参考结果
@@ -59,6 +61,7 @@ void run_test(int Ns, int d, int M, int C, int T, int r, int iters) {
     std::string kernel_name_base = "flash_decoding_allocated_buffer_f16u8_Ns" + std::to_string(Ns) + "Lt" + std::to_string(d) + "d" + std::to_string(d) + "M" + std::to_string(M) + "C" + std::to_string(C);
     std::string kernel_name_test = "flash_decoding_allocated_paged_buffer_f16u8_Ns" + std::to_string(Ns) + "Lt" + std::to_string(d) + "d" + std::to_string(d) + "M" + std::to_string(M) + "C" + std::to_string(C);
     std::string kernel_name_split_qkv = "flash_decoding_allocated_paged_split_qkv_buffer_f16u8_Ns" + std::to_string(Ns) + "Lt" + std::to_string(d) + "d" + std::to_string(d) + "M" + std::to_string(M) + "C" + std::to_string(C);
+    std::string name_paged_lastblock_sync = "flash_decoding_allocated_paged_lastblock_sync_buffer_f16u8_Ns" + std::to_string(Ns) + "Lt" + std::to_string(d) + "d" + std::to_string(d) + "M" + std::to_string(M) + "C" + std::to_string(C);
 
     if (kernel_registry.find(kernel_name_base) == kernel_registry.end()) {
         std::cerr << "Error: Baseline kernel " << kernel_name_base << " not found in registry." << std::endl;
@@ -72,10 +75,15 @@ void run_test(int Ns, int d, int M, int C, int T, int r, int iters) {
         std::cerr << "Error: Test kernel " << kernel_name_split_qkv << " not found in registry." << std::endl;
         return;
     }
+    if (kernel_registry.find(name_paged_lastblock_sync) == kernel_registry.end()) {
+        std::cerr << "Error: Test kernel " << name_paged_lastblock_sync << " not found in registry." << std::endl;
+        return;
+    }
 
     KernelFunc kernel_baseline = kernel_registry[kernel_name_base];
     KernelFunc kernel_test = kernel_registry[kernel_name_test];
     KernelFunc kernel_split_qkv = kernel_registry[kernel_name_split_qkv];
+    KernelFunc kernel_lastblock_sync = kernel_registry[name_paged_lastblock_sync];
     std::cout << "Successfully found kernels." << std::endl;
 
     // --- 2. 初始化数据 ---
@@ -107,10 +115,26 @@ void run_test(int Ns, int d, int M, int C, int T, int r, int iters) {
     torch::Tensor value_codes_transposed = value_codes.transpose(2, 3).contiguous();
 
     nvtx3::range_handle h = nvtx3::start_range_in<nvtx3::domain::global>("Kernel_Test", nvtx3::rgb{127,255,0});
-    auto out_base = kernel_baseline(query, key_codes, value_codes, key_cents, value_cents, key_residuals, value_residuals, r, partial_out, partial_lse);
-    auto out_test = kernel_test(query, key_codes, value_codes_transposed, key_cents, value_cents, key_residuals, value_residuals, r, partial_out, partial_lse);
-    auto out_test_qkv = kernel_split_qkv(query, key_codes, value_codes_transposed, key_cents, value_cents, key_residuals, value_residuals, r, partial_out, partial_lse);
+    // {
+    //     auto out_base = kernel_baseline(query, key_codes, value_codes, key_cents, value_cents, key_residuals, value_residuals, r, partial_out, partial_lse);
+    //     cudaDeviceSynchronize();
+    // }
+    // {
+    //     auto out_test = kernel_test(query, key_codes, value_codes_transposed, key_cents, value_cents, key_residuals, value_residuals, r, partial_out, partial_lse);
+    //     cudaDeviceSynchronize();
+    // }
+    // {
+    //     auto out_test_qkv = kernel_split_qkv(query, key_codes, value_codes_transposed, key_cents, value_cents, key_residuals, value_residuals, r, partial_out, partial_lse);
+    //     cudaDeviceSynchronize();
+    // }
+    
+    auto out_test_lastblock_sync = kernel_lastblock_sync(query, key_codes, value_codes_transposed, key_cents, value_cents, key_residuals, value_residuals, r, partial_out, partial_lse);
+    
+    
     nvtx3::end_range_in<nvtx3::domain::global>(h); // Ends the range
+
+
+
 
     // --- 4. 测试 Baseline Kernel ---
     {
@@ -178,6 +202,27 @@ void run_test(int Ns, int d, int M, int C, int T, int r, int iters) {
         printf("kernel_test: avg time per call: %.3f ms (Ns=%d, d=%d, M=%d, C=%d, T=%d, r=%d)\n", elapsed.count() / iters, Ns, d, M, C, T, r);
     }
 
+    // --- 5. 测试 Test (Paged_Split_qkv) Kernel ---
+    {
+        nvtx3::scoped_range test_range{"kernel_lastblock_sync"};
+        std::cout << "\n--- Evaluating kernel_lastblock_sync Kernel ---" << std::endl;
+        auto out_test_lastblock_sync = kernel_lastblock_sync(query, key_codes, value_codes_transposed, key_cents, value_cents, key_residuals, value_residuals, r, partial_out, partial_lse);
+
+        auto mae = (out_test_lastblock_sync - out_ref).abs().mean().item<float>();
+        auto mxe = (out_test_lastblock_sync - out_ref).abs().max().item<float>();
+        printf("shape: (%ld, %ld, %ld, %ld), MAE: %.4e, MaxAbsErr: %.4e\n", out_test_lastblock_sync.size(0), out_test_lastblock_sync.size(1), out_test_lastblock_sync.size(2), out_test_lastblock_sync.size(3), mae, mxe);
+
+        for(int i=0; i<10; ++i) kernel_lastblock_sync(query, key_codes, value_codes_transposed, key_cents, value_cents, key_residuals, value_residuals, r, partial_out, partial_lse);
+        cudaDeviceSynchronize();
+
+        auto start = std::chrono::high_resolution_clock::now();
+        for(int i=0; i<iters; ++i) kernel_lastblock_sync(query, key_codes, value_codes_transposed, key_cents, value_cents, key_residuals, value_residuals, r, partial_out, partial_lse);
+        cudaDeviceSynchronize();
+        auto end = std::chrono::high_resolution_clock::now();
+
+        std::chrono::duration<double, std::milli> elapsed = end - start;
+        printf("kernel_test: avg time per call: %.3f ms (Ns=%d, d=%d, M=%d, C=%d, T=%d, r=%d)\n", elapsed.count() / iters, Ns, d, M, C, T, r);
+    }
 }
 
 int main(int argc, char* argv[]) {

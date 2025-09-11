@@ -547,32 +547,40 @@ torch::Tensor flash_decoding_allocated_paged_lastblock_sync_buffer
 
 	// Fill partial_out[:, :, :Ns] and partial_lse[:, :, :Ns]
 	{
-		dim3 split_grid(bs, nh, Ns* M); // 线程块的总数量(gridDim) bs,nh,Ns: Ns是Nk的切分数
+		dim3 split_grid(bs, nh, Ns*M); // 线程块的总数量(gridDim) bs,nh,Ns: Ns是Nk的切分数
 		dim3 split_block(Lt, 1, 1);// 每个线程块内多少个线程并行(blockDim) x*y*z = Lt(d)*1*1
 		
-		int counter = 0;// 范围 bs * nh * (Ns*M)
-		
+		auto counter_tensor = torch::zeros({1}, torch::kInt32).cuda();
+		auto flag_tensor = torch::zeros({1}, torch::kInt32).cuda();
+		int* g_counter = counter_tensor.data_ptr<int>();
+		int* g_flag = flag_tensor.data_ptr<int>();
+
 		// 负责计算qk的线程块得全部写完到S中才能开始下一步[等待+S的读写] 需要等[bs, nh, Ns* M]个块的同步
 		// 同步S的数据到HBM中 
-		auto s_out_tensor = torch::empty({bs, nh, nk, M}, query.options());
+		const int actural_len = Ls * Ns;
+		auto s_out_tensor = torch::empty({bs, nh, actural_len,M}, query.options());
 		cuscalar_t *s_out = reinterpret_cast<cuscalar_t*>(s_out_tensor.data_ptr<scalar_t>());
 
 		
-		// flash_decoding_paged_lastblock_sync_V_split_kernel<cuscalar_t, code_t, Ns, Lt, d, M, C><<<split_grid, split_block>>>(
-		// 	reinterpret_cast<const cuscalar_t*>(ad_lut.data_ptr<scalar_t>()),
-		// 	key_codes.data_ptr<code_t>(),
-		// 	value_codes.data_ptr<code_t>(),
-		// 	reinterpret_cast<const cuscalar_t*>(value_cents.data_ptr<scalar_t>()),
-		// 	partial_out,
-		// 	partial_lse,
-		// 	bs,
-		// 	nh,
-		// 	nh_k,
-		// 	nk,
-		// 	Ls
-		// );
+		flash_decoding_paged_lastblock_sync_V_split_kernel<cuscalar_t, code_t, Ns, Lt, d, M, C><<<split_grid, split_block>>>(
+			reinterpret_cast<const cuscalar_t*>(ad_lut.data_ptr<scalar_t>()),
+			key_codes.data_ptr<code_t>(),
+			value_codes.data_ptr<code_t>(),
+			reinterpret_cast<const cuscalar_t*>(value_cents.data_ptr<scalar_t>()),
+			partial_out,
+			partial_lse,
+			s_out,
+			g_counter,
+			g_flag,
+			bs,
+			nh,
+			nh_k,
+			nk,
+			Ls,
+			actural_len
+		);
 		
-		// gpuErrchk(cudaPeekAtLastError());
+		gpuErrchk(cudaPeekAtLastError());
 	}
 	ad_lut = torch::Tensor(); // release memory
 
@@ -615,8 +623,8 @@ torch::Tensor flash_decoding_allocated_paged_lastblock_sync_buffer
 	return out;
 }
 
-#define register_flash_decoding_allocated_paged_buffer(T, code_alias, Nsv, Ltv, dv, Mv, Cv) \
-	torch::Tensor flash_decoding_allocated_paged_buffer_##T##code_alias##_Ns##Nsv##Lt##Ltv##d##dv##M##Mv##C##Cv( \
+#define register_flash_decoding_allocated_paged_lastblock_sync_buffer(T, code_alias, Nsv, Ltv, dv, Mv, Cv) \
+	torch::Tensor flash_decoding_allocated_paged_lastblock_sync_buffer_##T##code_alias##_Ns##Nsv##Lt##Ltv##d##dv##M##Mv##C##Cv( \
 		const torch::Tensor query, \
 		const torch::Tensor key_codes, \	
 		const torch::Tensor value_codes, \
@@ -628,7 +636,7 @@ torch::Tensor flash_decoding_allocated_paged_lastblock_sync_buffer
 		const torch::Tensor partial_out_buffer, \
 		const torch::Tensor partial_lse_buffer \
 	) { \
-		return flash_decoding_allocated_paged_buffer<T, code_alias, Nsv, Ltv, dv, Mv, Cv>( \
+		return flash_decoding_allocated_paged_lastblock_sync_buffer<T, code_alias, Nsv, Ltv, dv, Mv, Cv>( \
 			query, \
 			key_codes, \
 			value_codes, \

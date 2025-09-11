@@ -374,6 +374,281 @@ __global__ void flash_decoding_paged_V_split_kernel
 	}
 }
 
+/**
+ * @brief 在整个 grid 范围内同步所有线程块。
+ * 
+ * @param counter 一个指向全局内存的指针，用作原子计数器。
+ *                每次调用内核前必须在主机端重置为 0。
+ * @param flag    一个指向全局内存的指针，用作同步标志。
+ *                每次调用内核前必须在主机端重置为 0。
+ * @param total_blocks grid 中的总线程块数量。
+ */
+__device__ void grid_sync(int* counter, int* flag, int total_blocks) {
+    // 确保当前块的所有内存写入对其他块可见
+    __threadfence();
+
+    // 块内0号线程增加计数器
+    int last_block_tid = 0;
+    if (threadIdx.x == 0) {
+        last_block_tid = atomicAdd(counter, 1);
+    }
+    // 将计数值广播给块内所有线程
+    last_block_tid = __shfl_sync(0xffffffff, last_block_tid, 0);
+
+    // 判断是否是最后一个块
+    if (last_block_tid == total_blocks - 1) {
+        // 是最后一个块:
+        // 1. 重置计数器，为下一次同步做准备
+        if (threadIdx.x == 0) {
+            *counter = 0;
+        }
+        // 2. 确保重置操作可见，然后设置标志位以释放其他块
+        __threadfence();
+        if (threadIdx.x == 0) {
+            *(volatile int*)flag = 1;
+        }
+    } else {
+        // 不是最后一个块: 进入自旋等待，直到标志位被最后一个块设置
+        while (*(volatile int*)flag == 0) {
+            // 空转等待
+        }
+    }
+
+    // 所有块都通过了屏障，现在需要重置标志位
+    __syncthreads(); // 确保块内所有线程都到达这里
+    if (threadIdx.x == 0) {
+        // 由0号线程重置标志位
+        *(volatile int*)flag = 0;
+    }
+}
+
+
+
+
+template
+<
+	typename cuscalar_t, 
+	typename code_t,
+	int Ns, // number of splits along the nk dimension
+	int Lt, // number of key_codes and value_codes inside a tile.
+	int d,
+	int M,
+	int C
+>
+__global__ void flash_decoding_paged_lastblock_sync_V_split_kernel
+(
+	const cuscalar_t * __restrict__ ad_lut, // shaped (bs, nh, M, C)
+	const code_t * __restrict__ key_codes, // shaped (bs, nh_k, nk, M)
+	const code_t * __restrict__ value_codes, // shaped (bs, nh_k, nk, M)
+	const cuscalar_t * __restrict__ value_cents, // shaped (M, C, d_m)
+	cuscalar_t * __restrict__ out, // shaped (bs, nh, Ns+1, d)
+	cuscalar_t * __restrict__ lse, // shaped (bs, nh, Ns+1)
+	cuscalar_t * __restrict__ s_out, // shaped (bs, nh, Ns, Lt,M)
+	int * __restrict__ g_counter, // shaped (1)
+	int * __restrict__ g_flag,   // shaped (1)
+	const int bs,
+	const int nh,
+	const int nh_k,
+	const int nk,
+	const int Ls, // number of key_codes and value_codes inside a split.
+	const int actural_len
+)
+{
+	/**
+	 * kernel launch info:
+	 * grid sized (bs, nh, Ns*M)
+	 * block sized (Lt, 1, 1)
+	*/
+
+	using v16_t = typename core::Vector::VectorType<16>::type; // 16 bytes
+
+	const int b = blockIdx.x;
+	const int h = blockIdx.y;
+	
+	//每个thresblock算一个m
+	const int sid = blockIdx.z / M;
+	const int m_pass = blockIdx.z % M;
+	
+	const int tid = threadIdx.x;
+
+	const cuscalar_t scale = cs::to_cuscalar<cuscalar_t>(1.0f / sqrt(d));
+	constexpr int n_warps = d / 32;
+
+    // 定义必要的常量
+    constexpr int d_per_m = d / M;
+
+    // GQA example: nh=32, nh_k=8, query with h=(0,1,2,3),(4,5,6,7) will attend to key_codes with hk=0,1
+	const int hk = h / (nh / nh_k);
+
+    __shared__ cuscalar_t S[Lt]; // regarded as [1, Lt]
+	__shared__ cuscalar_t prev_rowmax;
+	__shared__ cuscalar_t rowmax;
+	__shared__ cuscalar_t prev_sum_exp;
+	__shared__ cuscalar_t sum_exp; // denoted as l in the paper https://crfm.stanford.edu/2023/07/17/flash2.html
+	__shared__ cuscalar_t online_scale;
+
+	__shared__ cuscalar_t output[d_per_m]; // regarded as [1, d_m]
+	__shared__ __align__(16) code_t local_codes[Lt]; 
+
+	__shared__ cuscalar_t T[C];// 用于V的计算 => 改为动态分配
+	
+	
+	if (tid == blockDim.x - 1) {
+		prev_rowmax  = cs::to_cuscalar<cuscalar_t>(-CUDART_INF_F);
+		prev_sum_exp = cs::to_cuscalar<cuscalar_t>(0.0f);
+		rowmax       = cs::to_cuscalar<cuscalar_t>(-CUDART_INF_F);
+		sum_exp      = cs::to_cuscalar<cuscalar_t>(0.0f);
+	}
+
+    core::DeviceOps::block_fill_zero<cuscalar_t>(output, d_per_m, blockDim.x, tid);
+	core::DeviceOps::block_fill_zero<cuscalar_t>(T, C, blockDim.x, tid);
+    __syncthreads();
+
+    const int lut_offset = b * (nh*M*C) + h * (M*C);
+	// in a split, loop over all tiles
+	const int split_j_start = sid * Ls;
+	const int split_j_end = min((sid + 1) * Ls, nk);
+	code_t key_code = 0;
+	int local_lut_offset = 0;
+    v16_t key_code_batch;
+
+    for (int tile_j_start=split_j_start; tile_j_start<split_j_end; tile_j_start+=Lt) {
+		const int tile_j_end = min(tile_j_start + Lt, split_j_end);
+		const int tile_j_len = tile_j_end - tile_j_start; // <= Lt
+		
+		// key_codes shaped (bs, nh_k, nk, M)
+		// 向量化搬运M*tile_j_len个
+		// core::DeviceOps::block_copy<code_t>(local_codes, key_codes + b * (nh_k*nk*M) + hk * (nk*M) + tile_j_start * M, tile_j_len * M, blockDim.x, tid);
+		
+		// 搬1个子空间 先常规搬运 tile_j_len 个 (tile_j_len对齐有问题 暂时不做向量化)
+		const int key_codes_offset = b * (nh_k*nk*M) + hk * (nk*M) + tile_j_start * M;
+		for (int i = tid; i < tile_j_len; i += blockDim.x) {
+			// 对于第 i 个 token, 访问其第 m_pass 个子码
+			local_codes[i] = key_codes[key_codes_offset + i * M + m_pass];
+		}
+		__syncthreads();
+		// S = scale * q @ KT
+		if (tid < tile_j_len) { // 计算部分 sim 值并写入全局内存 s_out
+			// 获取当前 token 的 key_code
+    		code_t key_code = local_codes[tid];
+			cuscalar_t partial_sim = ad_lut[lut_offset + m_pass * C + key_code];
+			// s_out 形状应为 (bs, nh, actural_len, M)
+    		const int s_out_offset = b * (nh * actural_len * M) + h * (actural_len * M) + (tile_j_start + tid) * M + m_pass;
+			s_out[s_out_offset] = partial_sim;
+		}
+
+		// 2. [同步] 强制所有线程块完成写入操作
+		const int total_blocks = gridDim.x * gridDim.y * gridDim.z;
+		grid_sync(g_counter, g_flag, total_blocks);
+
+		if (tid < tile_j_len) {
+			// 3.1. 向量化归约
+			cuscalar_t sim = cs::to_cuscalar<cuscalar_t>(0.0f);
+			using v16_t = typename core::Vector::VectorType<16>::type;
+			constexpr int N_PER_VEC = sizeof(v16_t) / sizeof(cuscalar_t);
+
+			// 计算当前线程需要读取的 M 个部分结果的基地址
+			const cuscalar_t* s_out_base_ptr = s_out + b * (nh * actural_len * M) + h * (actural_len * M) + (tile_j_start + tid) * M;
+			const v16_t* s_out_vec_ptr = reinterpret_cast<const v16_t*>(s_out_base_ptr);
+
+			 // 向量化循环
+			for (int m_vec = 0; m_vec < M / N_PER_VEC; ++m_vec) {
+				v16_t s_out_batch = s_out_vec_ptr[m_vec];
+				cuscalar_t* s_out_batch_ptr = reinterpret_cast<cuscalar_t*>(&s_out_batch);
+				#pragma unroll
+				for (int i = 0; i < N_PER_VEC; ++i) {
+					sim = csc::add<cuscalar_t>()(sim, s_out_batch_ptr[i]);
+				}
+			}
+			S[tid] = csc::mul<cuscalar_t>()(sim, scale);
+		}else {
+            S[tid] = cs::to_cuscalar<cuscalar_t>(-CUDART_INF_F);
+        }
+		__syncthreads();
+		
+		if (tid == 0) {
+			// reduce S to rowmax
+			rowmax = core::DeviceOps::single_thread_reduce<cuscalar_t, core::Reduction::MaxReduction>(S, Lt);
+			rowmax = csc::max<cuscalar_t>()(rowmax, prev_rowmax);
+			online_scale = csc::exp<cuscalar_t>()(csc::sub<cuscalar_t>()(prev_rowmax, rowmax));
+			prev_rowmax = rowmax;
+		}
+
+		__syncthreads();
+		
+		// subs S with rowmax, exp S
+		S[tid] = csc::exp<cuscalar_t>()(csc::sub<cuscalar_t>()(S[tid], rowmax));
+
+		// 载入 value 的 codes 到共享内存（与 K 同步 tile）
+        // output = output * online_scale + S @ V, we decode V on-the-fly <这个没有onlie了>
+        // core::DeviceOps::block_op<cuscalar_t, core::Scalar::CuScalar::mul>(output, output, online_scale, d_per_m, blockDim.x, tid);
+		
+		const code_t* v_codes_ptr = value_codes 
+                          + b * (nh_k * M * nk) 
+                          + hk * (M * nk) 
+                          + m_pass * nk      // 直接定位到当前 m_pass 的数据块
+                          + tile_j_start;    // 定位到 tile 的起始位置
+
+		// 使用并行拷贝，现在是合并访问
+		for (int j = tid; j < tile_j_len; j += blockDim.x) {
+			local_codes[j] = v_codes_ptr[j];
+		} 
+
+		core::DeviceOps::block_fill_zero<cuscalar_t>(T, C, blockDim.x, tid);
+		__syncthreads();
+
+		for (int j = tid; j < tile_j_len; j += blockDim.x) {
+            const int value_code = static_cast<int>(local_codes[j]);
+            atomicAdd(&T[value_code], S[j]);
+        }
+		__syncthreads();
+
+		// 3.2. 计算 T @ value_cents，并将 d_per_m 维结果直接累加到全局 out
+        // 关键修复：这里的 out 是全局内存指针，不是共享内存 output
+        const int out_offset = b * (nh*(Ns+1) * d) + h * ((Ns+1)*d) + sid * d; // 计算当前 split 的输出基地址
+        for (int k = tid; k < d_per_m; k += blockDim.x) {
+            cuscalar_t sum = cs::to_cuscalar<cuscalar_t>(0.0f);
+            for (int c = 0; c < C; ++c) {
+				sum = csc::add<cuscalar_t>()(sum, csc::mul<cuscalar_t>()(T[c], value_cents[m_pass * C * d_per_m + c * d_per_m + k]));
+			}
+            // 关键修复：直接原子地累加到全局内存 out 的正确位置
+            // 注意：这里需要一个 online_scale 来缩放之前 tile 的结果，但我们先简化，在最后处理
+            atomicAdd(&out[out_offset + m_pass * d_per_m + k], sum);
+        }
+
+		// reduce S to sum_exp
+		if (tid == 0) {
+			sum_exp = core::DeviceOps::single_thread_reduce<cuscalar_t, core::Reduction::SumReduction>(S, Lt);
+		}
+		__syncthreads();
+
+        sum_exp = csc::add<cuscalar_t>()(csc::mul<cuscalar_t>()(online_scale, prev_sum_exp), sum_exp);
+        prev_sum_exp = sum_exp;
+	}
+	__syncthreads(); // 确保所有线程都完成了 tile 循环
+
+	// dim3 split_grid(bs, nh, Ns * M);
+	// 关键修复：只有 m_pass=0 的线程块负责最后的归一化 
+    if (m_pass == 0) {
+		const int out_offset = b * (nh*(Ns+1)*d) + h * ((Ns+1)*d) + sid * d;
+        // 将全局 out 除以最终的 sum_exp
+        // 注意：这里的 out 已经包含了所有 tile 和所有 m_pass 的累加结果
+		core::DeviceOps::block_op<cuscalar_t, core::Scalar::CuScalar::div>(out + out_offset, out + out_offset, sum_exp, d, blockDim.x, tid);
+	}
+
+	if (tid == 0) {
+		lse[b * (nh*(Ns+1)) + h * (Ns+1) + sid] = csc::add<cuscalar_t>()(csc::log<cuscalar_t>()(sum_exp), rowmax);
+	}
+}
+
+// __device__ bool lastBlock(int* counter) {
+//   __threadfence(); //ensure that partial result is visible by all blocks
+//   int last = 0;
+//   if (threadIdx.x == 0)
+//     last = atomicAdd(counter, 1);
+//   return __syncthreads_or(last == gridDim.x-1);
+// }
+
 
 template
 <
@@ -754,14 +1029,6 @@ __global__ void reduce_kernel
     for (int i = tid; i < d; i += blockDim.x) {
         out[out_base_offset + i] = csc::div<cuscalar_t>()(final_output[i], final_sum_exp);
     }
-}
-
-__device__ bool lastBlock(int* counter) {
-  __threadfence(); //ensure that partial result is visible by all blocks
-  int last = 0;
-  if (threadIdx.x == 0)
-    last = atomicAdd(counter, 1);
-  return __syncthreads_or(last == gridDim.x-1);
 }
 
 

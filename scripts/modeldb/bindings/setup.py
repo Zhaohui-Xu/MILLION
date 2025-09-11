@@ -28,6 +28,7 @@ with open(cuda_template, "r") as fin, open(cuda_outfile, "w") as fout:
         fout.write(f"register_flash_decoding_allocated_buffer({f}, {u}, {Ns}, {Lt}, {d}, {M}, {C});\n")
         fout.write(f"register_flash_decoding_allocated_paged_buffer({f}, {u}, {Ns}, {Lt}, {d}, {M}, {C});\n")
         fout.write(f"register_flash_decoding_allocated_paged_split_qkv_buffer({f}, {u}, {Ns}, {Lt}, {d}, {M}, {C});\n")
+        fout.write(f"register_flash_decoding_allocated_paged_lastblock_sync_buffer({f}, {u}, {Ns}, {Lt}, {d}, {M}, {C});\n")
 
 # generate bindings.cpp
 cpp_template = "bindings.template.cpp"
@@ -41,6 +42,7 @@ with open(cpp_template, "r") as fin, open(cpp_outfile, "w") as fout:
         fout.write(f"declare_flash_decoding_allocated_buffer({f}, {u}, {Ns}, {Lt}, {d}, {M}, {C});\n")
         fout.write(f"declare_flash_decoding_allocated_paged_buffer({f}, {u}, {Ns}, {Lt}, {d}, {M}, {C});\n")
         fout.write(f"declare_flash_decoding_allocated_paged_split_qkv_buffer({f}, {u}, {Ns}, {Lt}, {d}, {M}, {C});\n")
+        fout.write(f"declare_flash_decoding_allocated_paged_lastblock_sync_buffer({f}, {u}, {Ns}, {Lt}, {d}, {M}, {C});\n")
 
     fout.write(r"PYBIND11_MODULE(bindings, m) {" + "\n")
     for f, u, Ns, d, M, C in product(float_list, uint_list, Ns_list, d_list, M_list, C_list):
@@ -48,6 +50,7 @@ with open(cpp_template, "r") as fin, open(cpp_outfile, "w") as fout:
         fout.write(f"    m.def(\"flash_decoding_allocated_buffer_{f}{u}_Ns{Ns}Lt{Lt}d{d}M{M}C{C}\", &flash_decoding_allocated_buffer_{f}{u}_Ns{Ns}Lt{Lt}d{d}M{M}C{C});\n")
         fout.write(f"    m.def(\"flash_decoding_allocated_paged_buffer_{f}{u}_Ns{Ns}Lt{Lt}d{d}M{M}C{C}\", &flash_decoding_allocated_paged_buffer_{f}{u}_Ns{Ns}Lt{Lt}d{d}M{M}C{C});\n")
         fout.write(f"    m.def(\"flash_decoding_allocated_paged_split_qkv_buffer_{f}{u}_Ns{Ns}Lt{Lt}d{d}M{M}C{C}\", &flash_decoding_allocated_paged_split_qkv_buffer_{f}{u}_Ns{Ns}Lt{Lt}d{d}M{M}C{C});\n")
+        fout.write(f"    m.def(\"flash_decoding_allocated_paged_lastblock_sync_buffer_{f}{u}_Ns{Ns}Lt{Lt}d{d}M{M}C{C}\", &flash_decoding_allocated_paged_split_qkv_buffer_{f}{u}_Ns{Ns}Lt{Lt}d{d}M{M}C{C});\n")
     fout.write(r"}" + "\n")
 
 ##################################################
