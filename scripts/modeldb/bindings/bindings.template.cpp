@@ -8,6 +8,19 @@ using u16 = uint16_t;
 using f16 = at::Half;
 using f32 = float;
 
+#define declare_flash_decoding_allocated_paged_split_qkv_buffer(T, code_alias, Nsv, Ltv, dv, Mv, Cv) \
+	torch::Tensor flash_decoding_allocated_paged_split_qkv_buffer_##T##code_alias##_Ns##Nsv##Lt##Ltv##d##dv##M##Mv##C##Cv( \
+		const torch::Tensor query, \
+		const torch::Tensor key_codes, \
+		const torch::Tensor value_codes, \
+		const torch::Tensor key_cents, \
+		const torch::Tensor value_cents, \
+		const torch::Tensor key_residuals, \
+		const torch::Tensor value_residuals, \
+		const int r, \
+		const torch::Tensor partial_out_buffer, \
+		const torch::Tensor partial_lse_buffer \
+	)
 #define declare_flash_decoding_allocated_paged_buffer(T, code_alias, Nsv, Ltv, dv, Mv, Cv) \
 	torch::Tensor flash_decoding_allocated_paged_buffer_##T##code_alias##_Ns##Nsv##Lt##Ltv##d##dv##M##Mv##C##Cv( \
 		const torch::Tensor query, \

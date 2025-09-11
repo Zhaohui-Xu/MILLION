@@ -76,7 +76,7 @@ def main():
                     key_residuals, value_residuals, r, partial_out, partial_lse)
     else:
         # 正确性：与 PyTorch SDPA 对比
-        out = kernel(query, key_codes, value_codes, key_cents, value_cents,
+        out = kernel(query, key_codes, value_codes, key_cents, value_cents.transpose(-2,-1),
                     key_residuals, value_residuals, r, partial_out, partial_lse)
     nvtx.end_range(default)
         
